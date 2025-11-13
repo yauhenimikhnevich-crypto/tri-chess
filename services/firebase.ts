@@ -25,6 +25,8 @@ import {
   limit,
   runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+// FIX: Re-export doc and getDoc for external use.
+export { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { 
   getDatabase,
   ref,
@@ -39,7 +41,8 @@ import { OnlineUser, Invite, OnlineGame, BoardCell, GameProposal } from "../type
 
 let firebaseApp: FirebaseApp;
 let auth: Auth;
-let db: Firestore;
+// FIX: Export db so it can be accessed from other files.
+export let db: Firestore;
 let rtdb: Database;
 
 let initialized = false;

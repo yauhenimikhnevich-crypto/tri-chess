@@ -85,11 +85,9 @@ const calculateRawMoves = (piece: Piece, position: Coordinates, boardState: (Boa
       }
       
       // Backward
-      if (!kingIsCurrentlyInCheck) {
-        const backMove: Coordinates = { row: position.row + dirs.backward[0], col: position.col + dirs.backward[1] };
-        if (isPlayable(backMove, boardState) && !boardState[backMove.row][backMove.col]?.piece) {
-          moves.push(backMove);
-        }
+      const backMove: Coordinates = { row: position.row + dirs.backward[0], col: position.col + dirs.backward[1] };
+      if (isPlayable(backMove, boardState) && !boardState[backMove.row][backMove.col]?.piece) {
+        moves.push(backMove);
       }
 
       // 2. Omnidirectional Diagonal Capture

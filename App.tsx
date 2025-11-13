@@ -1,12 +1,10 @@
 
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { BoardCell, Coordinates, Piece, PieceType, Player, PlayerType, AppState, OnlineUser, OnlineGame } from './types';
 import { generateInitialBoard, PIECES_TO_SETUP, SETUP_ZONES, PLAYER_COLORS, PIECE_SCORES, generateEmptyBoard, initialSandboxPieces, firebaseConfig, isFirebaseConfigValid, SETUP_ORDER } from './constants';
 import * as firebase from './services/firebase';
 import { getValidMoves, isKingInCheck, isCheckmate, isStalemate, determineStalemateWinner, isPromotionMove } from './services/gameLogic';
-import { findBestMove } from './services/aiPlayer';
-import { getAiSetup } from './services/aiPlayer';
+import { findBestMove, getAiSetup } from './services/aiPlayer';
 import Board from './components/Board';
 import GameInfoPanel from './components/GameInfoPanel';
 import PieceStash from './components/PieceStash';
@@ -19,6 +17,8 @@ import OnlineLobby from './components/OnlineLobby';
 import FirebaseSetupInstructions from './components/FirebaseSetupInstructions';
 import AuthErrorScreen from './components/AuthErrorScreen';
 import ConfirmationModal from './components/ConfirmationModal';
+import GameSetup from './components/GameSetup';
+import RulesModal from './components/RulesModal';
 
 
 type GamePhase = 'SETUP' | 'PLAY' | 'PROMOTION' | 'GAME_OVER';
@@ -27,7 +27,6 @@ type DuelingState = { attacker: Player; defender: Player } | null;
 const initialScores = { [Player.Gray]: 0, [Player.White]: 0, [Player.Black]: 0 };
 const initialCapturedPieces: { [key in Player]: Piece[] } = { [Player.Gray]: [], [Player.White]: [], [Player.Black]: [] };
 
-// Helper to create a simplified string representation of the board for history tracking
 const boardToString = (board: (BoardCell | null)[][]): string => {
     return board.map(row => 
         row.map(cell => {
@@ -93,7 +92,6 @@ const App: React.FC = () => {
   
   const leftPlayersRef = useRef(leftPlayers);
   leftPlayersRef.current = leftPlayers;
-  const aiWorkerRef = useRef<{ worker: Worker; url: string } | null>(null);
 
   // --- Sandbox Validation ---
   const sandboxValidation = useMemo(() => {
@@ -163,75 +161,60 @@ const App: React.FC = () => {
     if (!onlineGameId || !user) return;
 
     const unsubscribe = firebase.onGameUpdate(onlineGameId, (gameData) => {
-      if (!gameData) {
-        // The game was deleted by a player. Clean up and go to menu.
-        resetGame('MAIN_MENU');
-        return;
-      }
-      
-      const oldLeftPlayers = leftPlayersRef.current;
-      
-      let myColorForThisUpdate: Player | null = null;
-      if (gameData.players && user) {
-        for (const color of SETUP_ORDER) {
-            if (gameData.players[color]?.id === user.id) {
-                myColorForThisUpdate = color;
-                break;
+      if (gameData) {
+        const oldLeftPlayers = leftPlayersRef.current;
+        
+        let myColorForThisUpdate: Player | null = null;
+        if (gameData.players) {
+            for (const color of SETUP_ORDER) {
+                if (gameData.players[color]?.id === user.id) {
+                    myColorForThisUpdate = color;
+                    break;
+                }
             }
         }
-      }
 
-      // Sync core state from Firestore
-      setBoardState(gameData.boardState);
-      setCurrentPlayer(gameData.currentPlayer);
-      setEliminatedPlayers(gameData.eliminatedPlayers);
-      setLeftPlayers(gameData.leftPlayers || []);
-      setScores(gameData.scores);
-      setCapturedPieces(gameData.capturedPieces);
-      setDuelingState(gameData.duelingState);
-      setStatusMessage(gameData.statusMessage);
-      setGamePhase(gameData.gamePhase);
-      setWinner(gameData.winner);
-      setPlayerTypes(gameData.playerTypes);
-      setOnlinePlayers(gameData.players);
-      setSetupCompleted(gameData.setupCompleted || {});
-      setSelectedPiece(null);
-      setValidMoves([]);
-      
-      // Post-sync checks for ongoing games
-      const newlyLeftPlayer = gameData.leftPlayers?.find(p => !oldLeftPlayers.includes(p));
-      const amIStillInGame = myColorForThisUpdate && !gameData.leftPlayers?.includes(myColorForThisUpdate);
-      const remainingPlayersAfterLeave = SETUP_ORDER.filter(p => !gameData.leftPlayers?.includes(p) && !gameData.eliminatedPlayers.includes(p));
-      
-      // Leaver Event Check: A player just left.
-      if (newlyLeftPlayer && amIStillInGame) {
-          // If more than one player remains, show the continue prompt.
-          if(remainingPlayersAfterLeave.length > 1) {
-            setShowContinuePrompt(true);
-          } else {
-            // If only one player is left, the game is over.
-            // Let the game logic in processTurnEnd handle this, but for now just show a message.
-            if (myColorForThisUpdate === remainingPlayersAfterLeave[0]) {
-                 firebase.updateGame(onlineGameId, { 
-                    winner: remainingPlayersAfterLeave[0], 
-                    gamePhase: 'GAME_OVER',
-                    statusMessage: `All opponents have left. ${PLAYER_COLORS[remainingPlayersAfterLeave[0]].name} is the winner!`
-                });
+        setBoardState(gameData.boardState);
+        setCurrentPlayer(gameData.currentPlayer);
+        setEliminatedPlayers(gameData.eliminatedPlayers);
+        setLeftPlayers(gameData.leftPlayers || []);
+        setScores(gameData.scores);
+        setCapturedPieces(gameData.capturedPieces);
+        setDuelingState(gameData.duelingState);
+        setStatusMessage(gameData.statusMessage);
+        setGamePhase(gameData.gamePhase);
+        setWinner(gameData.winner);
+        setPlayerTypes(gameData.playerTypes);
+        setOnlinePlayers(gameData.players);
+        setSetupCompleted(gameData.setupCompleted || {});
+        setSelectedPiece(null); // Deselect piece on any update to prevent stale state
+        setValidMoves([]);
+
+        const newlyLeftPlayer = gameData.leftPlayers?.find(p => !oldLeftPlayers.includes(p));
+        const amIStillInGame = myColorForThisUpdate && !gameData.leftPlayers?.includes(myColorForThisUpdate);
+
+        if (newlyLeftPlayer && amIStillInGame) {
+             setStatusMessage(`${PLAYER_COLORS[newlyLeftPlayer].name} has left the game.`);
+             const originalHumansCount = Object.values(gameData.playerTypes).filter(t => t === 'ONLINE_HUMAN').length;
+             const remainingPlayers = SETUP_ORDER.filter(p => !gameData.leftPlayers?.includes(p) && !gameData.eliminatedPlayers.includes(p));
+             const remainingHumansCount = remainingPlayers.filter(p => gameData.playerTypes[p] === 'ONLINE_HUMAN').length;
+
+             if (originalHumansCount === 2 && remainingHumansCount === 1) {
+                 setShowContinuePrompt(true);
+             }
+        }
+
+        if (gameData.gamePhase === 'SETUP') {
+          const playersInGame = SETUP_ORDER.filter(p => gameData.playerTypes[p]);
+          const allPlayersDone = playersInGame.every(p => gameData.setupCompleted[p]);
+          if (allPlayersDone) {
+            if (myColorForThisUpdate === Player.White) {
+               firebase.updateGame(onlineGameId, { gamePhase: 'PLAY', statusMessage: 'All pieces are set. White to move.' });
             }
           }
-      }
-
-
-      // Post-setup transition logic
-      if (gameData.gamePhase === 'SETUP') {
-        const playersInGame = SETUP_ORDER.filter(p => gameData.playerTypes[p]);
-        const allPlayersDone = playersInGame.every(p => gameData.setupCompleted[p]);
-        if (allPlayersDone && myColorForThisUpdate === Player.White) {
-            firebase.updateGame(onlineGameId, { gamePhase: 'PLAY', statusMessage: 'All pieces are set. White to move.' });
         }
       }
     });
-
     return () => unsubscribe();
   }, [onlineGameId, user]);
 
@@ -246,65 +229,59 @@ const App: React.FC = () => {
   };
 
   // --- AI LOGIC ---
+  const aiWorkerRef = useRef<{ worker: Worker; url: string } | null>(null);
   useEffect(() => {
     const isAiTurn = gamePhase === 'PLAY' && !winner && playerTypes[currentPlayer]?.startsWith('AI');
-
-    // Always terminate a lingering worker from a previous turn before starting a new logic path
-    if (aiWorkerRef.current) {
-        aiWorkerRef.current.worker.terminate();
-        URL.revokeObjectURL(aiWorkerRef.current.url);
-        aiWorkerRef.current = null;
-    }
-
     if (!isAiTurn) {
-        return; // Not an AI's turn, so we're done.
-    }
-    
-    setStatusMessage(`${PLAYER_COLORS[currentPlayer].name} is thinking...`);
-    
-    // Introduce a delay to make AI vs AI games watchable and prevent render-blocking loops.
-    const timeoutId = setTimeout(() => {
-        const currentActor = playerTypes[currentPlayer] as PlayerType;
-        const depth = currentActor === PlayerType.AIEasy ? 2 : 3;
-        const activePlayers = SETUP_ORDER.filter(p => !eliminatedPlayers.includes(p) && !leftPlayers.includes(p));
-
-        const { worker, url } = findBestMove(boardState, currentPlayer, activePlayers, depth, moveHistory);
-        aiWorkerRef.current = { worker, url };
-
-        worker.onmessage = (e) => {
-            const bestMove = e.data;
-            // Check game state AGAIN right before moving, as it could have changed during calculation.
-            if (bestMove && gamePhase === 'PLAY' && !winner && playerTypes[currentPlayer]?.startsWith('AI')) {
-                movePiece(bestMove.from, bestMove.to, bestMove.promotion);
-            }
-            // Clean up this specific worker instance
-            if (aiWorkerRef.current) {
-              aiWorkerRef.current.worker.terminate();
-              URL.revokeObjectURL(aiWorkerRef.current.url);
-              aiWorkerRef.current = null;
-            }
-        };
-
-        worker.onerror = (e) => {
-            console.error('AI Worker Error:', e);
-            if (aiWorkerRef.current) {
-              aiWorkerRef.current.worker.terminate();
-              URL.revokeObjectURL(aiWorkerRef.current.url);
-              aiWorkerRef.current = null;
-            }
-        };
-    }, 500); // 500ms delay before starting the thinking process
-
-    // The main cleanup function for the useEffect
-    return () => {
-        clearTimeout(timeoutId);
         if (aiWorkerRef.current) {
             aiWorkerRef.current.worker.terminate();
             URL.revokeObjectURL(aiWorkerRef.current.url);
             aiWorkerRef.current = null;
         }
+        return;
     };
-  }, [currentPlayer, gamePhase, winner, playerTypes, boardState, eliminatedPlayers, leftPlayers, onlineGameId, moveHistory]);
+
+    const currentActor = playerTypes[currentPlayer] as PlayerType;
+    setStatusMessage(`${PLAYER_COLORS[currentPlayer].name} is thinking...`);
+
+    const timeoutId = setTimeout(() => {
+      const depth = currentActor === PlayerType.AIEasy ? 2 : 3;
+      const activePlayers = SETUP_ORDER.filter(p => !eliminatedPlayers.includes(p) && !leftPlayers.includes(p));
+      const { worker, url } = findBestMove(boardState, currentPlayer, activePlayers, depth, moveHistory);
+      aiWorkerRef.current = { worker, url };
+      
+      worker.onmessage = (e) => {
+        const bestMove = e.data;
+        if (bestMove) {
+          movePiece(bestMove.from, bestMove.to, bestMove.promotion);
+        }
+        if (aiWorkerRef.current) {
+            aiWorkerRef.current.worker.terminate();
+            URL.revokeObjectURL(aiWorkerRef.current.url);
+            aiWorkerRef.current = null;
+        }
+      };
+
+      worker.onerror = (e) => {
+        console.error('AI worker error', e);
+        if (aiWorkerRef.current) {
+            aiWorkerRef.current.worker.terminate();
+            URL.revokeObjectURL(aiWorkerRef.current.url);
+            aiWorkerRef.current = null;
+        }
+      }
+
+    }, 500);
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (aiWorkerRef.current) {
+        aiWorkerRef.current.worker.terminate();
+        URL.revokeObjectURL(aiWorkerRef.current.url);
+        aiWorkerRef.current = null;
+      }
+    };
+  }, [currentPlayer, gamePhase, winner, playerTypes, boardState, eliminatedPlayers, leftPlayers, moveHistory]);
   
   // Online AI Setup
   useEffect(() => {
@@ -322,7 +299,6 @@ const App: React.FC = () => {
   useEffect(() => {
     if (onlineGameId || gamePhase !== 'SETUP') return;
     
-    // Check if all players (human and AI) have completed their setup
     const allPlayersInGame = Object.keys(playerTypes) as Player[];
     const allPlayersSetup = allPlayersInGame.every(p => setupCompleted[p]);
 
@@ -330,18 +306,12 @@ const App: React.FC = () => {
       setGamePhase('PLAY');
       setCurrentPlayer(Player.White);
       setStatusMessage('All pieces are set. White to move.');
-      setMoveHistory([boardToString(boardState)]);
     }
-  }, [setupCompleted, gamePhase, onlineGameId, playerTypes, boardState]);
+  }, [setupCompleted, gamePhase, onlineGameId, playerTypes]);
 
 
   // --- GAME RESET & SETUP ---
   const resetGame = (backTo: AppState = 'MAIN_MENU') => {
-    if (aiWorkerRef.current) {
-        aiWorkerRef.current.worker.terminate();
-        URL.revokeObjectURL(aiWorkerRef.current.url);
-        aiWorkerRef.current = null;
-    }
     setBoardState(generateEmptyBoard());
     setCurrentPlayer(Player.White);
     setGamePhase(null);
@@ -377,8 +347,6 @@ const App: React.FC = () => {
     let turnMessage = '';
     let didCheckmate = false;
 
-    setMoveHistory(prev => [...prev, boardToString(newBoard)]);
-
     const activePlayersBeforeMove = SETUP_ORDER.filter(p => !currentEliminated.includes(p) && !leftPlayers.includes(p));
 
     // 1. Check for eliminations
@@ -401,15 +369,10 @@ const App: React.FC = () => {
         if (opponentEliminated) {
             if (pointsWinner) updatedScores[pointsWinner] += 13;
             currentEliminated.push(opponent);
-            
-            const remainingPlayersAfterElimination = SETUP_ORDER.filter(p => ![...currentEliminated, ...leftPlayers].includes(p));
-
-            // Only remove pieces if the game is set to continue.
-            // If only one player is left, the game is over, so we keep the final board state.
+            const remainingPlayersAfterElimination = SETUP_ORDER.filter(p => !currentEliminated.includes(p) && !leftPlayers.includes(p));
             if (remainingPlayersAfterElimination.length > 1) {
               newBoard = newBoard.map(row => row.map(cell => (cell?.piece?.player === opponent ? { ...cell, piece: null } : cell)));
             }
-            
             break; 
         }
     }
@@ -481,6 +444,7 @@ const App: React.FC = () => {
   };
   
   const movePiece = (from: Coordinates, to: Coordinates, promotionChoice?: PieceType) => {
+    setMoveHistory(prev => [...prev, boardToString(boardState)]);
     const movingPlayer = currentPlayer;
     const newBoard = JSON.parse(JSON.stringify(boardState));
     
@@ -505,14 +469,12 @@ const App: React.FC = () => {
     setSelectedPiece(null);
     setValidMoves([]);
 
-    if (isPromotionMove(pieceToMove, to)) {
-      if (promotionChoice) {
-        // AI move: promote directly and end the turn
-        (newBoard[to.row][to.col] as BoardCell).piece = { player: movingPlayer, type: promotionChoice, hasMoved: true };
-        setPromotionState(null);
+    const needsPromotion = isPromotionMove(pieceToMove, to);
+
+    if (needsPromotion && promotionChoice) {
+        (newBoard[to.row][to.col] as BoardCell).piece = { ...pieceToMove, type: promotionChoice };
         processTurnEnd(newBoard, movingPlayer, newScores, newCapturedPieces);
-      } else {
-        // Human move: show the promotion modal
+    } else if (needsPromotion) {
         setPromotionState({ coords: to, player: movingPlayer });
         if (onlineGameId) {
             firebase.updateGame(onlineGameId, { boardState: newBoard, gamePhase: 'PROMOTION' });
@@ -520,7 +482,6 @@ const App: React.FC = () => {
             setBoardState(newBoard);
             setGamePhase('PROMOTION');
         }
-      }
     } else {
         processTurnEnd(newBoard, movingPlayer, newScores, newCapturedPieces);
     }
@@ -574,7 +535,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleLocalGameSetup = (config: { types: { [key in Player]: PlayerType } }) => {
+  const handleStartLocalGame = (config: { types: { [key in Player]: PlayerType } }) => {
     resetGame('IN_GAME');
     setPlayerTypes(config.types);
     
@@ -622,7 +583,6 @@ const App: React.FC = () => {
 
     const playersToEliminate = SETUP_ORDER.filter(p => !playersOnBoard.has(p));
     
-    // Keep the board from the sandbox
     setAppState('IN_GAME');
     setGamePhase('PLAY');
     setPlayerTypes({
@@ -635,7 +595,6 @@ const App: React.FC = () => {
     setCurrentPlayer(firstPlayer);
     setStatusMessage(`Game started from custom position. ${PLAYER_COLORS[firstPlayer].name} to move.`);
     
-    // Reset all other relevant game states to their initial values
     setSelectedPiece(null);
     setValidMoves([]);
     setWinner(null);
@@ -646,7 +605,6 @@ const App: React.FC = () => {
     setPromotionState(null);
     setDuelingState(null);
     setSandboxSelectedPiece(null);
-    setMoveHistory([boardToString(boardState)]);
   };
 
   const handleEnterOnlineLobby = () => setAppState('ONLINE_LOBBY');
@@ -662,21 +620,15 @@ const App: React.FC = () => {
 
     if (validMoves.some(m => m.row === coords.row && m.col === coords.col)) {
         if (onlineGameId) {
-            firebase.updateGameWithTransaction(onlineGameId, (currentGame) => {
-                const boardFromDb = currentGame.boardState;
-                (boardFromDb[coords.row][coords.col] as BoardCell).piece = { player, type, hasMoved: false };
+            firebase.updateGameWithTransaction(onlineGameId, (gameData) => {
+                const newBoard = JSON.parse(JSON.stringify(gameData.boardState));
+                (newBoard[coords.row][coords.col] as BoardCell).piece = { player, type, hasMoved: false };
+                const updates: any = { boardState: newBoard };
 
-                let placedCount = 0;
-                SETUP_ZONES[player].forEach(c => {
-                    if (boardFromDb[c.row][c.col]?.piece?.player === player) {
-                        placedCount++;
-                    }
-                });
-                const totalPiecesForPlayer = PIECES_TO_SETUP.length;
-                const isSetupComplete = placedCount >= totalPiecesForPlayer;
-
-                const updates: { [key: string]: any } = { boardState: boardFromDb };
-                if (isSetupComplete && !currentGame.setupCompleted[player]) {
+                const neededPieceCounts: { [key in PieceType]?: number } = {};
+                PIECES_TO_SETUP.forEach(t => { neededPieceCounts[t] = (neededPieceCounts[t] || 0) + 1; });
+                const placedPieces = gameData.boardState.flat().filter(c => c?.piece?.player === player).map(c => c!.piece!.type);
+                if (placedPieces.length + 1 >= PIECES_TO_SETUP.length) {
                     updates[`setupCompleted.${player}`] = true;
                 }
                 return updates;
@@ -702,41 +654,29 @@ const App: React.FC = () => {
 
   const handleRandomSetupForPlayer = (player: Player) => {
     if (!player) return;
-    
     if (onlineGameId) {
-        firebase.updateGameWithTransaction(onlineGameId, (currentGame) => {
-            const currentBoard = currentGame.boardState;
+        firebase.updateGameWithTransaction(onlineGameId, (gameData) => {
+            const piecesToRandomlyPlace: PieceType[] = [];
             const neededPieceCounts: { [key in PieceType]?: number } = {};
-            PIECES_TO_SETUP.forEach(type => { neededPieceCounts[type] = (neededPieceCounts[type] || 0) + 1; });
-
-            const placedPieceCounts: { [key in PieceType]?: number } = {};
-            SETUP_ZONES[player].forEach(coord => {
-                const piece = currentBoard[coord.row][coord.col]?.piece;
-                if (piece && piece.player === player && PIECES_TO_SETUP.includes(piece.type)) {
-                    placedPieceCounts[piece.type] = (placedPieceCounts[piece.type] || 0) + 1;
+            PIECES_TO_SETUP.forEach(t => { neededPieceCounts[t] = (neededPieceCounts[t] || 0) + 1; });
+            gameData.boardState.flat().forEach(c => {
+                if(c?.piece?.player === player && neededPieceCounts[c.piece.type]) {
+                    neededPieceCounts[c.piece.type]!--;
                 }
             });
-
-            const piecesForRandomPlacement: PieceType[] = [];
             (Object.keys(neededPieceCounts) as PieceType[]).forEach(type => {
-                const needed = neededPieceCounts[type] || 0;
-                const placed = placedPieceCounts[type] || 0;
-                for (let i = 0; i < needed - placed; i++) { piecesForRandomPlacement.push(type); }
+                for (let i = 0; i < neededPieceCounts[type]!; i++) { piecesToRandomlyPlace.push(type); }
             });
-            
-            if(piecesForRandomPlacement.length === 0) return {}; // Nothing to update
 
-            const newBoard = getAiSetup(currentBoard, player, piecesForRandomPlacement);
-            return {
-                boardState: newBoard,
-                [`setupCompleted.${player}`]: true
-            };
+            if (piecesToRandomlyPlace.length > 0) {
+                const newBoard = getAiSetup(gameData.boardState, player, piecesToRandomlyPlace);
+                return { boardState: newBoard, [`setupCompleted.${player}`]: true };
+            }
+            return { [`setupCompleted.${player}`]: true };
         });
     } else {
-        // Local Game Logic
         const piecesToRandomlyPlace = piecesToPlaceByPlayer[player] || [];
         if (piecesToRandomlyPlace.length === 0) return;
-
         const newBoard = getAiSetup(boardState, player, piecesToRandomlyPlace);
         setBoardState(newBoard);
         setPiecesToPlaceByPlayer(prev => ({ ...prev, [player]: [] }));
@@ -778,81 +718,34 @@ const App: React.FC = () => {
     setSandboxAvailablePieces(newAvailablePieces);
   };
 
-  const handleContinueGame = () => {
-    setShowContinuePrompt(false);
-    // The main game state is already handled by the onGameUpdate listener.
-    // This just dismisses the modal. We can send a message for extra clarity.
-    if (onlineGameId) {
-        const remainingPlayers = SETUP_ORDER.filter(p => !leftPlayers.includes(p) && !eliminatedPlayers.includes(p));
-        const nextPlayerStillInGame = remainingPlayers.includes(currentPlayer);
-        
-        firebase.updateGame(onlineGameId, { 
-            statusMessage: `The match continues. It is ${PLAYER_COLORS[currentPlayer].name}'s turn.`,
-            currentPlayer: nextPlayerStillInGame ? currentPlayer : remainingPlayers[0] // Advance turn if leaver was current
-        });
-    }
-  };
-
   const handleBackToMenuClick = () => {
-    if (onlineGameId && appState === 'IN_GAME' && gamePhase !== 'GAME_OVER') {
+    if (onlineGameId && appState === 'IN_GAME' && !winner) {
       setShowLeaveConfirmation(true);
     } else {
       resetGame('MAIN_MENU');
     }
   };
 
-  const handleConfirmLeave = () => {
-    const gameIdToLeave = onlineGameId;
-    const playerColor = myColor;
-    const currentLeftPlayers = leftPlayersRef.current;
-    const currentEliminatedPlayers = eliminatedPlayers;
-    
-    // Hide modals and immediately reset the local game state and navigate to the menu.
-    // This ensures the client is in a clean state before any new user interaction can occur.
+  const handleConfirmLeave = async () => {
     setShowLeaveConfirmation(false);
-    setShowContinuePrompt(false);
     resetGame('MAIN_MENU');
+    if (onlineGameId && myColor) {
+        const gameDoc = await firebase.getDoc(firebase.doc(firebase.db, "games", onlineGameId));
+        if (!gameDoc.exists()) { return; }
+        const gameData = gameDoc.data() as OnlineGame;
+        const currentLeftPlayers = gameData.leftPlayers || [];
+        const newLeftPlayers = [...currentLeftPlayers, myColor];
+        
+        const remainingPlayersCount = SETUP_ORDER.filter(p => 
+            !newLeftPlayers.includes(p) && 
+            !gameData.eliminatedPlayers.includes(p)
+        ).length;
 
-    // Perform the necessary database operation in the background ("fire and forget").
-    // The UI is already reset, so we don't need to await this.
-    if (gameIdToLeave && playerColor && !currentLeftPlayers.includes(playerColor)) {
-      const playersInGameBeforeMyLeave = SETUP_ORDER.filter(
-        (p) => !currentLeftPlayers.includes(p) && !currentEliminatedPlayers.includes(p)
-      );
-
-      const playersRemainingAfterMyLeave = playersInGameBeforeMyLeave.length - 1;
-
-      // If this player's departure ends the game, delete the game document.
-      if (playersRemainingAfterMyLeave <= 1) {
-        firebase.deleteGame(gameIdToLeave);
-      } else {
-        // Otherwise, just mark this player as having left.
-        const newLeftPlayers = [...currentLeftPlayers, playerColor];
-        const remainingPlayers = playersInGameBeforeMyLeave.filter(p => p !== playerColor);
-        const boardData = boardState.map(row =>
-            row.map(cell =>
-                (cell?.piece?.player === playerColor ? { ...cell, piece: null } : cell)
-            )
-        );
-
-        let nextPlayer = currentPlayer;
-        // If the leaving player was the current player, advance the turn
-        if (currentPlayer === playerColor) {
-            const leaverIndex = SETUP_ORDER.indexOf(playerColor);
-            let nextIndex = (leaverIndex + 1) % SETUP_ORDER.length;
-            while(!remainingPlayers.includes(SETUP_ORDER[nextIndex])) {
-                nextIndex = (nextIndex + 1) % SETUP_ORDER.length;
-            }
-            nextPlayer = SETUP_ORDER[nextIndex];
+        if (remainingPlayersCount <= 1) {
+            await firebase.deleteGame(onlineGameId);
+        } else {
+            await firebase.updateGame(onlineGameId, { leftPlayers: newLeftPlayers });
         }
-
-        firebase.updateGame(gameIdToLeave, { 
-            leftPlayers: newLeftPlayers,
-            boardState: boardData,
-            currentPlayer: nextPlayer,
-            statusMessage: `${PLAYER_COLORS[playerColor].name} has left the game.`
-        });
-      }
     }
   };
 
@@ -862,9 +755,10 @@ const App: React.FC = () => {
   if (authError) return <AuthErrorScreen message={authError} onRetry={() => window.location.reload()} />;
   if (!user || appState === 'GETTING_USERNAME') return <UsernameModal onSetUsername={handleSetUsername} />;
   
-  if (appState === 'MAIN_MENU') return <MainMenu onLocalGame={handleLocalGameSetup} onOnlineGame={handleEnterOnlineLobby} onSandbox={handleSandboxSetup} />;
-  // FIX: Corrected typo in AppState value from 'ONLINE_Lobby' to 'ONLINE_LOBBY' to match the type definition.
+  if (appState === 'MAIN_MENU') return <MainMenu onLocalGameSetup={() => setAppState('LOCAL_SETUP')} onOnlineGame={handleEnterOnlineLobby} onSandbox={handleSandboxSetup} onShowRules={() => setAppState('RULES')} />;
+  if (appState === 'LOCAL_SETUP') return <GameSetup onStart={handleStartLocalGame} onBack={() => setAppState('MAIN_MENU')} />;
   if (appState === 'ONLINE_LOBBY') return <OnlineLobby user={user} onGameStarted={handleGameStarted} onCancel={() => resetGame('MAIN_MENU')} />;
+  if (appState === 'RULES') return <RulesModal onClose={() => setAppState('MAIN_MENU')} />;
   
   const localPlayerToSetup = localSetupPlayerIndex !== null ? SETUP_ORDER[localSetupPlayerIndex] : null;
 
@@ -882,16 +776,16 @@ const App: React.FC = () => {
        <ConfirmationModal
         isOpen={showContinuePrompt}
         title="Player Left"
-        message="An opponent has left. Do you wish to continue the match?"
-        onConfirm={handleContinueGame}
-        onCancel={handleConfirmLeave}
+        message="An opponent has left the game. Do you want to continue playing against the AI?"
+        onConfirm={() => setShowContinuePrompt(false)}
+        onCancel={() => resetGame('MAIN_MENU')}
         confirmText="Continue"
         cancelText="Leave Game"
       />
        {gamePhase === 'PROMOTION' && promotionState && (
         <PromotionModal player={promotionState.player} onSelect={handlePromotionSelect} />
       )}
-      <div className="w-full max-w-7xl mx-auto flex flex-col md:flex-row items-center md:items-start justify-center gap-8">
+      <div className="w-full max-w-7xl mx-auto flex flex-col md:flex-row items-center md:items-start justify-center gap-4 md:gap-8">
         <div className="order-2 md:order-1 flex-grow">
           <Board
             boardState={boardState}
@@ -906,7 +800,7 @@ const App: React.FC = () => {
         <div className="order-1 md:order-2 w-full md:w-auto md:min-w-[300px] flex flex-col gap-4">
             <div className="flex justify-end">
                 <button onClick={handleBackToMenuClick} className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white font-semibold rounded-md shadow-md text-sm transition-transform hover:scale-105">
-                   {gamePhase === 'GAME_OVER' ? 'Back to Menu' : 'Leave Game'}
+                   Back to Menu
                 </button>
             </div>
             
@@ -923,26 +817,22 @@ const App: React.FC = () => {
             )}
 
             {gamePhase === 'SETUP' && onlineGameId && myColor && !setupCompleted[myColor] && (() => {
+                const piecesToPlace: PieceType[] = [];
                 const neededPieceCounts: { [key in PieceType]?: number } = {};
-                PIECES_TO_SETUP.forEach(type => { neededPieceCounts[type] = (neededPieceCounts[type] || 0) + 1; });
-                const placedPieceCounts: { [key in PieceType]?: number } = {};
-                SETUP_ZONES[myColor].forEach(coord => {
-                    const piece = boardState[coord.row][coord.col]?.piece;
-                    if (piece && piece.player === myColor && PIECES_TO_SETUP.includes(piece.type)) {
-                        placedPieceCounts[piece.type] = (placedPieceCounts[piece.type] || 0) + 1;
+                PIECES_TO_SETUP.forEach(t => { neededPieceCounts[t] = (neededPieceCounts[t] || 0) + 1; });
+                boardState.flat().forEach(c => {
+                    if(c?.piece?.player === myColor && neededPieceCounts[c.piece.type]) {
+                        neededPieceCounts[c.piece.type]!--;
                     }
                 });
-                const remaining: PieceType[] = [];
                 (Object.keys(neededPieceCounts) as PieceType[]).forEach(type => {
-                    const needed = neededPieceCounts[type] || 0;
-                    const placed = placedPieceCounts[type] || 0;
-                    for (let i = 0; i < needed - placed; i++) { remaining.push(type); }
+                    for (let i = 0; i < neededPieceCounts[type]!; i++) { piecesToPlace.push(type); }
                 });
                 return (
                     <div className="w-full p-4 bg-gray-800/50 rounded-lg shadow-xl">
                         <PieceStash 
                             playerToSetup={myColor} 
-                            piecesToPlace={remaining}
+                            piecesToPlace={piecesToPlace}
                             onPieceDragStart={(type) => setDraggedPieceInfo({ player: myColor, type })} 
                             onPieceDragEnd={() => setDraggedPieceInfo(null)}
                             onRandomPlacement={() => handleRandomSetupForPlayer(myColor)}

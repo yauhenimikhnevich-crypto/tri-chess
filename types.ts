@@ -38,7 +38,7 @@ export interface BoardCell {
 
 // --- New types for Firebase Online Functionality ---
 
-export type AppState = 'GETTING_USERNAME' | 'MAIN_MENU' | 'LOCAL_SETUP' | 'ONLINE_LOBBY' | 'IN_GAME' | 'SANDBOX_SETUP';
+export type AppState = 'GETTING_USERNAME' | 'MAIN_MENU' | 'LOCAL_SETUP' | 'ONLINE_LOBBY' | 'IN_GAME' | 'SANDBOX_SETUP' | 'RULES';
 
 export interface OnlineUser {
   id: string; // Firebase Auth UID

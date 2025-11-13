@@ -123,12 +123,12 @@ const calculateRawMoves = (piece, position, boardState, kingIsCurrentlyInCheck =
           moves.push(sideMove);
         }
       }
-      if (!kingIsCurrentlyInCheck) {
-        const backMove = { row: position.row + dirs.backward[0], col: position.col + dirs.backward[1] };
-        if (isPlayable(backMove, boardState) && !boardState[backMove.row][backMove.col]?.piece) {
-          moves.push(backMove);
-        }
+      
+      const backMove = { row: position.row + dirs.backward[0], col: position.col + dirs.backward[1] };
+      if (isPlayable(backMove, boardState) && !boardState[backMove.row][backMove.col]?.piece) {
+        moves.push(backMove);
       }
+      
       const captureMoves = [
         { row: position.row - 1, col: position.col - 1 }, { row: position.row - 1, col: position.col + 1 },
         { row: position.row + 1, col: position.col - 1 }, { row: position.row + 1, col: position.col + 1 },
