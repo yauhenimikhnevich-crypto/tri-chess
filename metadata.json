@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Tri-Chess",
+  "description": "A three-player chess variant on a triangular board. Players (White, Black, and Gray) strategically place their pieces and compete to be the last one standing. Features unique pawn movement and an impassable central fortress.",
+  "requestFramePermissions": []
+}
