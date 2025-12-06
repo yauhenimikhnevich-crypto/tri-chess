@@ -1,22 +1,23 @@
-
 import { BoardCell, Player, PieceType } from '../types';
 import { SETUP_ZONES } from '../constants';
 
 const workerCode = `
 // --- Inlined Dependencies ---
-
 const Player = { Gray: 'GRAY', White: 'WHITE', Black: 'BLACK' };
 const PieceType = { Pawn: 'PAWN', Rook: 'ROOK', Knight: 'KNIGHT', Bishop: 'BISHOP', Queen: 'QUEEN', King: 'KING' };
 
 const BOARD_ROWS = 10;
 const BOARD_COLS = 20;
 
-const PIECE_SCORES = {
+// Dynamic Time Limit
+let CURRENT_TIME_LIMIT = 1500; 
+
+const PIECE_VALUES = {
   [PieceType.Pawn]: 100,
-  [PieceType.Rook]: 500,
   [PieceType.Knight]: 320,
   [PieceType.Bishop]: 330,
-  [PieceType.Queen]: 900,
+  [PieceType.Rook]: 500,
+  [PieceType.Queen]: 975, 
   [PieceType.King]: 20000,
 };
 
@@ -26,503 +27,792 @@ const PROMOTION_ZONES = {
   [Player.Gray]: [{ row: 9, col: 9 }, { row: 9, col: 10 }],
 };
 
-const SETUP_ZONES = {
-  [Player.Gray]: [
-    { row: 1, col: 8 }, { row: 1, col: 9 }, { row: 1, col: 10 }, { row: 1, col: 11 },
-    { row: 0, col: 9 }, { row: 0, col: 10 }
-  ],
-  [Player.White]: [
-    { row: 9, col: 0 }, { row: 9, col: 1 }, { row: 9, col: 2 },
-    { row: 8, col: 1 }, { row: 8, col: 2 },
-    { row: 7, col: 2 }
-  ],
-  [Player.Black]: [
-    { row: 9, col: 19 }, { row: 9, col: 18 }, { row: 9, col: 17 },
-    { row: 8, col: 18 }, { row: 8, col: 17 },
-    { row: 7, col: 17 }
-  ]
-};
+const FORTRESS_SET = new Set([
+  '5,9','5,10','6,8','6,9','6,10','6,11',
+  '7,8','7,9','7,10','7,11','8,9','8,10'
+]);
 
+// --- SEARCH HEURISTICS STORAGE ---
+// Killer Moves: [Ply][Slot] -> Move Object
+const MAX_PLY = 30;
+const killerMoves = new Array(MAX_PLY).fill(null).map(() => [null, null]);
 
-// --- Inlined gameLogic.ts ---
+// History Heuristic: Map<"r,c-r,c", score>
+const historyMoves = new Map();
 
-const isPromotionMove = (piece, to) => {
-    if (piece.type !== PieceType.Pawn) return false;
-    const playerPromotionZones = PROMOTION_ZONES[piece.player];
-    return playerPromotionZones.some(zone => zone.row === to.row && zone.col === to.col);
-};
-
-const isWithinBoard = (coords) => {
-  const { row, col } = coords;
-  if (row < 0 || row >= BOARD_ROWS || col < 0 || col >= BOARD_COLS) {
-    return false;
-  }
-  const cellsInRow = 2 * (row + 1);
-  const padding = (BOARD_COLS - cellsInRow) / 2;
-  return col >= padding && col < BOARD_COLS - padding;
-};
-
-const isPlayable = (coords, boardState) => {
-  if (!isWithinBoard(coords)) return false;
-  const cell = boardState[coords.row][coords.col];
-  return cell?.isPlayable === true;
-};
-
-const calculateRawMoves = (piece, position, boardState, kingIsCurrentlyInCheck = false) => {
-  const moves = [];
-
-  const addSlidingMoves = (directions) => {
-    for (const [dr, dc] of directions) {
-      let nextPos = { row: position.row + dr, col: position.col + dc };
-      while (isPlayable(nextPos, boardState)) {
-        const pieceAtNext = boardState[nextPos.row][nextPos.col]?.piece;
-        if (pieceAtNext) {
-          if (pieceAtNext.player !== piece.player) {
-            moves.push(nextPos);
-          }
-          break;
-        }
-        moves.push(nextPos);
-        nextPos = { row: nextPos.row + dr, col: nextPos.col + dc };
-      }
-    }
-  };
-  
-  const addSingleMoves = (potentialMoves) => {
-      for(const move of potentialMoves) {
-          if(isPlayable(move, boardState)) {
-              const pieceAtNext = boardState[move.row][move.col]?.piece;
-              if(!pieceAtNext || pieceAtNext.player !== piece.player) {
-                  moves.push(move);
-              }
-          }
-      }
-  };
-
-  switch (piece.type) {
-    case PieceType.Pawn:
-      const movementDirections = {
-        [Player.Gray]: { forward: [1, 0], backward: [-1, 0], sideways: [[0, -1], [0, 1]] },
-        [Player.White]: { forward: [0, 1], backward: [0, -1], sideways: [[-1, 0], [1, 0]] },
-        [Player.Black]: { forward: [0, -1], backward: [0, 1], sideways: [[-1, 0], [1, 0]] },
-      };
-      const dirs = movementDirections[piece.player];
-      const oneStep = { row: position.row + dirs.forward[0], col: position.col + dirs.forward[1] };
-      if (isPlayable(oneStep, boardState) && !boardState[oneStep.row][oneStep.col]?.piece) {
-        moves.push(oneStep);
-        if (!piece.hasMoved) {
-          const twoSteps = { row: position.row + 2 * dirs.forward[0], col: position.col + 2 * dirs.forward[1] };
-          if (isPlayable(twoSteps, boardState) && !boardState[twoSteps.row][twoSteps.col]?.piece) {
-            moves.push(twoSteps);
-          }
-        }
-      }
-      for (const sideDir of dirs.sideways) {
-        const sideMove = { row: position.row + sideDir[0], col: position.col + sideDir[1] };
-        if (isPlayable(sideMove, boardState) && !boardState[sideMove.row][sideMove.col]?.piece) {
-          moves.push(sideMove);
-        }
-      }
-      
-      const backMove = { row: position.row + dirs.backward[0], col: position.col + dirs.backward[1] };
-      if (isPlayable(backMove, boardState) && !boardState[backMove.row][backMove.col]?.piece) {
-        moves.push(backMove);
-      }
-      
-      const captureMoves = [
-        { row: position.row - 1, col: position.col - 1 }, { row: position.row - 1, col: position.col + 1 },
-        { row: position.row + 1, col: position.col - 1 }, { row: position.row + 1, col: position.col + 1 },
-      ];
-      for (const move of captureMoves) {
-        if (isPlayable(move, boardState)) {
-          const pieceAtNext = boardState[move.row][move.col]?.piece;
-          if (pieceAtNext && pieceAtNext.player !== piece.player) {
-            moves.push(move);
-          }
-        }
-      }
-      break;
-    case PieceType.Rook: addSlidingMoves([[0, 1], [0, -1], [1, 0], [-1, 0]]); break;
-    case PieceType.Bishop:
-      addSlidingMoves([[1, 1], [1, -1], [-1, 1], [-1, -1]]);
-      if (!piece.justSwitchedDiagonal) {
-        const orthogonalMoves = [
-          { row: position.row + 1, col: position.col }, { row: position.row - 1, col: position.col },
-          { row: position.row, col: position.col + 1 }, { row: position.row, col: position.col - 1 },
-        ];
-        addSingleMoves(orthogonalMoves);
-      }
-      break;
-    case PieceType.Queen: addSlidingMoves([[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [1, -1], [-1, 1], [-1, -1]]); break;
-    case PieceType.King:
-      const kingMoves = [];
-      for(let dr = -1; dr <= 1; dr++) for(let dc = -1; dc <= 1; dc++) {
-        if (dr !== 0 || dc !== 0) kingMoves.push({row: position.row + dr, col: position.col + dc});
-      }
-      addSingleMoves(kingMoves);
-      break;
-    case PieceType.Knight:
-      addSingleMoves([
-          { row: position.row - 2, col: position.col - 1 }, { row: position.row - 2, col: position.col + 1 },
-          { row: position.row + 2, col: position.col - 1 }, { row: position.row + 2, col: position.col + 1 },
-          { row: position.row - 1, col: position.col - 2 }, { row: position.row - 1, col: position.col + 2 },
-          { row: position.row + 1, col: position.col - 2 }, { row: position.row + 1, col: position.col + 2 },
-      ]);
-      break;
-  }
-  return moves;
-};
-
-const findKing = (player, boardState) => {
-  for (let r = 0; r < BOARD_ROWS; r++) for (let c = 0; c < BOARD_COLS; c++) {
-    const cell = boardState[r][c];
-    if (cell?.piece?.player === player && cell.piece.type === PieceType.King) return { row: r, col: c };
-  }
-  return null;
-};
-
-const isKingInCheck = (player, boardState) => {
-  const kingPos = findKing(player, boardState);
-  if (!kingPos) return false;
-  const opponents = [Player.White, Player.Black, Player.Gray].filter(p => p !== player);
-  for (let r = 0; r < BOARD_ROWS; r++) for (let c = 0; c < BOARD_COLS; c++) {
-    const cell = boardState[r][c];
-    if (cell?.piece && opponents.includes(cell.piece.player)) {
-      if (cell.piece.type === PieceType.Bishop) {
-        const directions = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-        for (const [dr, dc] of directions) {
-          let nextPos = { row: r + dr, col: c + dc };
-          while (isPlayable(nextPos, boardState)) {
-            if (nextPos.row === kingPos.row && nextPos.col === kingPos.col) return true;
-            if (boardState[nextPos.row][nextPos.col]?.piece) break;
-            nextPos = { row: nextPos.row + dr, col: nextPos.col + dc };
-          }
-        }
-      } else {
-        const moves = calculateRawMoves(cell.piece, { row: r, col: c }, boardState);
-        if (moves.some(move => move.row === kingPos.row && move.col === kingPos.col)) return true;
-      }
-    }
-  }
-  return false;
-};
-
-const getValidMoves = (piece, position, boardState) => {
-  const kingIsCurrentlyInCheck = isKingInCheck(piece.player, boardState);
-  const rawMoves = calculateRawMoves(piece, position, boardState, kingIsCurrentlyInCheck);
-  
-  const validMoves = [];
-  for (const move of rawMoves) {
-    const originalPiece = boardState[position.row][position.col].piece;
-    const capturedPiece = boardState[move.row][move.col].piece;
-
-    // Perform the move on the board
-    boardState[move.row][move.col].piece = { ...originalPiece, hasMoved: true };
-    boardState[position.row][position.col].piece = null;
-
-    // Check if the king is safe after the move
-    if (!isKingInCheck(piece.player, boardState)) {
-        validMoves.push(move);
-    }
-    
-    // Undo the move
-    boardState[position.row][position.col].piece = originalPiece;
-    boardState[move.row][move.col].piece = capturedPiece;
-  }
-  return validMoves;
-};
-
-const isCheckmate = (player, boardState) => {
-    if(!isKingInCheck(player, boardState)) return false;
-    for (let r = 0; r < BOARD_ROWS; r++) for (let c = 0; c < BOARD_COLS; c++) {
-        const cell = boardState[r][c];
-        if (cell?.piece?.player === player && getValidMoves(cell.piece, { row: r, col: c }, boardState).length > 0) return false;
-    }
-    return true;
-};
-
-const isStalemate = (player, boardState) => {
-    if (isKingInCheck(player, boardState)) return false;
-    for (let r = 0; r < BOARD_ROWS; r++) for (let c = 0; c < BOARD_COLS; c++) {
-        const cell = boardState[r][c];
-        if (cell?.piece?.player === player && getValidMoves(cell.piece, { row: r, col: c }, boardState).length > 0) return false;
-    }
-    return true;
-};
-
-// --- Original aiWorker.ts content ---
-
+// --- HELPER: Board To String ---
 const boardToString = (board) => {
     return board.map(row => 
         row.map(cell => {
-            if (!cell?.piece) return ' ';
-            return \`\${cell.piece.player[0]}\${cell.piece.type[0]}\`;
+            if (!cell) return ' ';
+            return cell.player.charAt(0) + cell.type.charAt(0);
         }).join('')
     ).join('|');
 };
 
-const evaluateBoard = (board, aiPlayer, activePlayers, moveHistory) => {
-    const currentBoardStr = boardToString(board);
-    if (moveHistory.filter(h => h === currentBoardStr).length >= 2) {
-        return 0;
-    }
-
-    let scores = {
-        material: { [Player.White]: 0, [Player.Black]: 0, [Player.Gray]: 0 },
-        mobility: { [Player.White]: 0, [Player.Black]: 0, [Player.Gray]: 0 },
-        kingSafety: { [Player.White]: 0, [Player.Black]: 0, [Player.Gray]: 0 },
-        development: { [Player.White]: 0, [Player.Black]: 0, [Player.Gray]: 0 }
-    };
-    
-    const setupZoneMap = new Map();
-    for (const p in SETUP_ZONES) {
-        SETUP_ZONES[p].forEach(coord => {
-            setupZoneMap.set(\`\${coord.row}-\${coord.col}\`, p);
+// --- ZOBRIST HASHING ---
+const zobristTable = [];
+const zobristTurn = {}; 
+const initZobrist = () => {
+    for(let i=0; i<BOARD_ROWS*BOARD_COLS; i++) {
+        zobristTable[i] = {};
+        ['WHITE','BLACK','GRAY'].forEach(p => {
+            zobristTable[i][p] = {};
+            ['PAWN','ROOK','KNIGHT','BISHOP','QUEEN','KING'].forEach(t => {
+                zobristTable[i][p][t] = Math.floor(Math.random() * 2147483647);
+            });
         });
     }
+    ['WHITE','BLACK','GRAY'].forEach(p => {
+        zobristTurn[p] = Math.floor(Math.random() * 2147483647);
+    });
+};
+initZobrist();
 
-    for (let r = 0; r < BOARD_ROWS; r++) {
-        for (let c = 0; c < BOARD_COLS; c++) {
-            const cell = board[r][c];
-            if (cell?.piece) {
-                const piece = cell.piece;
-                const player = piece.player;
-                
-                scores.material[player] += PIECE_SCORES[piece.type];
+const computeHash = (board, playerToMove) => {
+    let h = 0;
+    for(let r=0; r<BOARD_ROWS; r++) {
+        for(let c=0; c<BOARD_COLS; c++) {
+            const p = board[r][c];
+            if(p) {
+                h ^= zobristTable[r*BOARD_COLS+c][p.player][p.type];
+            }
+        }
+    }
+    h ^= zobristTurn[playerToMove];
+    return h;
+};
 
-                if (piece.type === PieceType.Pawn) {
-                    let promotionBonus = 0;
-                    let progress = 0;
-                    if (player === Player.Gray) {
-                        progress = r - 1;
-                        promotionBonus = Math.pow(progress, 2) * 5; // Reduced bonus
-                    } else if (player === Player.White) {
-                        progress = c - 2;
-                        promotionBonus = Math.pow(progress, 2) * 5; // Reduced bonus
-                    } else if (player === Player.Black) {
-                        progress = 17 - c;
-                        promotionBonus = Math.pow(progress, 2) * 5; // Reduced bonus
-                    }
-                    scores.material[player] += promotionBonus;
-                }
+// --- PRECOMPUTED TABLES ---
+const pstCenter = new Int16Array(BOARD_ROWS * BOARD_COLS).fill(0);
+const pstKingSafety = new Int16Array(BOARD_ROWS * BOARD_COLS).fill(0);
 
-                if (piece.type !== PieceType.Pawn && piece.type !== PieceType.King) {
-                    const isAtHome = setupZoneMap.get(\`\${r}-\${c}\`) === player;
-                    if (!isAtHome) {
-                        scores.development[player] += 25; // Increased bonus
-                    }
+for(let r=0; r<BOARD_ROWS; r++) {
+    for(let c=0; c<BOARD_COLS; c++) {
+        const dist = Math.abs(c - 9.5) + Math.abs(r - 5);
+        if (dist < 5) {
+            pstCenter[r*BOARD_COLS+c] = (5 - dist) * 10;
+            pstKingSafety[r*BOARD_COLS+c] = -(6 - dist) * 50; 
+        } else {
+            pstKingSafety[r*BOARD_COLS+c] = 30; 
+        }
+    }
+}
+
+// --- HELPERS ---
+const isPlayable = (r, c) => {
+    if (r < 0 || r >= BOARD_ROWS || c < 0 || c >= BOARD_COLS) return false;
+    if (r >= 5 && r <= 8 && c >= 8 && c <= 11) {
+        if (FORTRESS_SET.has(r + ',' + c)) return false;
+    }
+    const padding = (BOARD_COLS - 2 * (r + 1)) / 2;
+    return c >= padding && c < BOARD_COLS - padding;
+};
+
+const isPromotionZone = (player, r, c) => {
+    const zones = PROMOTION_ZONES[player];
+    if (!zones) return false;
+    for(let i=0; i<zones.length; i++) if (zones[i].row === r && zones[i].col === c) return true;
+    return false;
+};
+
+const createPromotionMap = (player) => {
+    const map = new Int16Array(BOARD_ROWS * BOARD_COLS).fill(0);
+    const targets = PROMOTION_ZONES[player];
+    const distMap = new Int16Array(BOARD_ROWS * BOARD_COLS).fill(-1);
+    const queue = [];
+    
+    targets.forEach(t => {
+        if (isPlayable(t.row, t.col)) {
+            const idx = t.row * BOARD_COLS + t.col;
+            distMap[idx] = 0;
+            queue.push({r: t.row, c: t.col, d: 0});
+        }
+    });
+
+    let head = 0;
+    while(head < queue.length) {
+        const {r, c, d} = queue[head++];
+        const neighbors = [
+            {r: r+1, c: c}, {r: r-1, c: c}, {r: r, c: c+1}, {r: r, c: c-1},
+            {r: r+1, c: c+1}, {r: r+1, c: c-1}, {r: r-1, c: c+1}, {r: r-1, c: c-1}
+        ];
+        for(let i=0; i<8; i++) {
+            const nr = neighbors[i].r, nc = neighbors[i].c;
+            if (isPlayable(nr, nc)) {
+                const idx = nr * BOARD_COLS + nc;
+                if (distMap[idx] === -1) {
+                    distMap[idx] = d + 1;
+                    queue.push({r: nr, c: nc, d: d + 1});
                 }
             }
         }
     }
-
-    for (const player of activePlayers) {
-        scores.mobility[player] = getAllPossibleMoves(board, player).length;
-        if (isKingInCheck(player, board)) {
-            scores.kingSafety[player] -= 500;
-             activePlayers.forEach(p => {
-                if (p !== player) scores.kingSafety[p] += 250;
-            });
+    for(let i=0; i<distMap.length; i++) {
+        if (distMap[i] !== -1) {
+            const dist = distMap[i];
+            if (dist === 0) map[i] = 800; 
+            else if (dist === 1) map[i] = 500; 
+            else if (dist === 2) map[i] = 300; 
+            else if (dist === 3) map[i] = 150;
+            else if (dist === 4) map[i] = 100;
+            else map[i] = Math.max(0, 80 - dist * 5); 
         }
     }
-
-    let finalScore = 0;
-    const aiMaterial = scores.material[aiPlayer];
-    const aiMobility = scores.mobility[aiPlayer];
-    const aiKingSafety = scores.kingSafety[aiPlayer];
-    const aiDevelopment = scores.development[aiPlayer];
-    let opponentMaterial = 0;
-    let opponentMobility = 0;
-    
-    activePlayers.forEach(p => {
-        if (p !== aiPlayer) {
-            opponentMaterial += scores.material[p];
-            opponentMobility += scores.mobility[p];
-            finalScore += scores.kingSafety[p];
-        }
-    });
-
-    const opponentCount = Math.max(1, activePlayers.length - 1);
-    finalScore += aiMaterial - (opponentMaterial / opponentCount);
-    finalScore += (aiMobility - opponentMobility) * 3;
-    finalScore += aiKingSafety;
-    finalScore += aiDevelopment;
-
-    if (isCheckmate(aiPlayer, board)) return -Infinity;
-    if (isStalemate(aiPlayer, board)) return -10000;
-
-    for(const player of activePlayers) {
-        if (player !== aiPlayer) {
-            if (isCheckmate(player, board)) finalScore += 50000;
-            if (isStalemate(player, board)) finalScore += 25000;
-        }
-    }
-
-    return finalScore;
+    return map;
 };
 
+const pawnPromotionDistMap = {
+    [Player.White]: createPromotionMap(Player.White),
+    [Player.Black]: createPromotionMap(Player.Black),
+    [Player.Gray]: createPromotionMap(Player.Gray),
+};
 
-const getAllPossibleMoves = (board, player) => {
+const getDistance = (r1, c1, r2, c2) => Math.abs(r1 - r2) + Math.abs(c1 - c2);
+
+const isSquareAttackedByHero = (targetR, targetC, board, hero) => {
+    // Knight
+    const knightDir = [[-2,-1],[-2,1],[2,-1],[2,1],[-1,-2],[-1,2],[1,-2],[1,2]];
+    for (let i=0; i<8; i++) {
+        const nr = targetR + knightDir[i][0], nc = targetC + knightDir[i][1];
+        if (isPlayable(nr, nc)) {
+            const p = board[nr][nc];
+            if (p && p.player === hero && p.type === PieceType.Knight) return true;
+        }
+    }
+    // Sliding
+    const ortho = [[0,1],[0,-1],[1,0],[-1,0]];
+    const diag = [[1,1],[1,-1],[-1,1],[-1,-1]];
+    
+    // Rooks/Queens
+    for (let i=0; i<4; i++) {
+        let nr = targetR + ortho[i][0], nc = targetC + ortho[i][1];
+        while (isPlayable(nr, nc)) {
+            const p = board[nr][nc];
+            if (p) {
+                if (p.player === hero && (p.type === PieceType.Rook || p.type === PieceType.Queen)) return true;
+                break;
+            }
+            nr += ortho[i][0];
+            nc += ortho[i][1];
+        }
+    }
+    // Bishops/Queens
+    for (let i=0; i<4; i++) {
+        let nr = targetR + diag[i][0], nc = targetC + diag[i][1];
+        while (isPlayable(nr, nc)) {
+            const p = board[nr][nc];
+            if (p) {
+                if (p.player === hero && (p.type === PieceType.Bishop || p.type === PieceType.Queen)) return true;
+                break;
+            }
+            nr += diag[i][0];
+            nc += diag[i][1];
+        }
+    }
+    
+    // Pawn threats - OMNIDIRECTIONAL
+    const pawnCaps = [{r:1, c:1}, {r:1, c:-1}, {r:-1, c:1}, {r:-1, c:-1}];
+    for (const d of pawnCaps) {
+        const pr = targetR + d.r; 
+        const pc = targetC + d.c;
+        if (isPlayable(pr, pc)) {
+            const p = board[pr][pc];
+            if (p && p.player === hero && p.type === PieceType.Pawn) return true;
+        }
+    }
+
+    // King
+    const kNeighbors = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
+    for (let i=0; i<8; i++) {
+        const nr = targetR + kNeighbors[i][0], nc = targetC + kNeighbors[i][1];
+        if (isPlayable(nr, nc)) {
+             const p = board[nr][nc];
+             if (p && p.player === hero && p.type === PieceType.King) return true;
+        }
+    }
+
+    return false;
+};
+
+// --- MOVE GENERATION ---
+const generateMoves = (board, player, capturesOnly) => {
     const moves = [];
     for (let r = 0; r < BOARD_ROWS; r++) {
         for (let c = 0; c < BOARD_COLS; c++) {
             const cell = board[r][c];
-            if (cell?.piece?.player === player) {
-                const validMoves = getValidMoves(cell.piece, { row: r, col: c }, board);
-                validMoves.forEach(to => moves.push({ from: { row: r, col: c }, to }));
+            if (!cell || cell.player !== player) continue;
+            const type = cell.type;
+            const fr = r, fc = c;
+            
+            if (type === PieceType.Pawn) {
+                const dirs = { 
+                    [Player.Gray]:{f:[1,0], s:[[0,-1],[0,1]]}, 
+                    [Player.White]:{f:[0,1], s:[[-1,0],[1,0]]}, 
+                    [Player.Black]:{f:[0,-1], s:[[-1,0],[1,0]]}
+                }[player];
+
+                // Captures
+                const caps = [{r:1, c:1}, {r:1, c:-1}, {r:-1, c:1}, {r:-1, c:-1}];
+                for (const cap of caps) {
+                    const nr = r + cap.r, nc = c + cap.c;
+                    if (isPlayable(nr, nc)) {
+                        const target = board[nr][nc];
+                        if (target && target.player !== player) {
+                            const isProm = isPromotionZone(player, nr, nc);
+                            moves.push({fr, fc, tr:nr, tc:nc, prom: isProm ? PieceType.Queen : undefined, cap: true});
+                        }
+                    }
+                }
+
+                // Non-Captures
+                const f1r = r + dirs.f[0], f1c = c + dirs.f[1];
+                if (isPlayable(f1r, f1c) && !board[f1r][f1c]) {
+                    const isProm = isPromotionZone(player, f1r, f1c);
+                    if (!capturesOnly || isProm) {
+                        moves.push({fr, fc, tr:f1r, tc:f1c, prom: isProm ? PieceType.Queen : undefined});
+                    }
+                    if (!capturesOnly && !cell.hasMoved) {
+                        const f2r = r + 2*dirs.f[0], f2c = c + 2*dirs.f[1];
+                        if (isPlayable(f2r, f2c) && !board[f2r][f2c]) moves.push({fr, fc, tr:f2r, tc:f2c});
+                    }
+                }
+                for(let i=0; i<2; i++) {
+                    const sr = r + dirs.s[i][0], sc = c + dirs.s[i][1];
+                    if (isPlayable(sr, sc) && !board[sr][sc]) {
+                        const isProm = isPromotionZone(player, sr, sc);
+                        if (!capturesOnly || isProm) {
+                            moves.push({fr, fc, tr:sr, tc:sc, prom: isProm ? PieceType.Queen : undefined});
+                        }
+                    }
+                }
+            } 
+            else {
+                // Sliding & Knight & King
+                let dirs = [];
+                let sliding = false;
+                if (type === PieceType.Rook) { dirs = [[0,1],[0,-1],[1,0],[-1,0]]; sliding = true; }
+                else if (type === PieceType.Bishop) { dirs = [[1,1],[1,-1],[-1,1],[-1,-1]]; sliding = true; }
+                else if (type === PieceType.Queen) { dirs = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]; sliding = true; }
+                else if (type === PieceType.Knight) { dirs = [[-2,-1],[-2,1],[2,-1],[2,1],[-1,-2],[-1,2],[1,-2],[1,2]]; sliding = false; }
+                else if (type === PieceType.King) { dirs = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]]; sliding = false; }
+
+                for (let i=0; i<dirs.length; i++) {
+                    let nr = r + dirs[i][0], nc = c + dirs[i][1];
+                    while (isPlayable(nr, nc)) {
+                        const target = board[nr][nc];
+                        if (target) {
+                            if (target.player !== player) moves.push({fr, fc, tr:nr, tc:nc, cap: true});
+                            break; 
+                        }
+                        if (!capturesOnly) moves.push({fr, fc, tr:nr, tc:nc});
+                        if (!sliding) break;
+                        nr += dirs[i][0];
+                        nc += dirs[i][1];
+                    }
+                }
             }
         }
     }
     return moves;
 };
 
-const minimax = (board, depth, alpha, beta, playerToMove, aiPlayer, activePlayers, moveHistory) => {
-    if (depth === 0 || activePlayers.length <= 1) {
-        return evaluateBoard(board, aiPlayer, activePlayers, moveHistory);
-    }
-    const possibleMoves = getAllPossibleMoves(board, playerToMove);
-    if (possibleMoves.length === 0) {
-        return evaluateBoard(board, aiPlayer, activePlayers, moveHistory);
-    }
-    if (playerToMove === aiPlayer) {
-        let maxEval = -Infinity;
-        for (const move of possibleMoves) {
-            const originalPiece = board[move.from.row][move.from.col].piece;
-            const capturedPiece = board[move.to.row][move.to.col].piece;
-            
-            // Create a copy to avoid mutation issues
-            const pieceToMove = { ...originalPiece, hasMoved: true };
-            board[move.to.row][move.to.col].piece = pieceToMove;
-            board[move.from.row][move.from.col].piece = null;
-            if (isPromotionMove(originalPiece, move.to)) {
-                pieceToMove.type = PieceType.Queen;
-            }
-
-            const nextPlayerIndex = (activePlayers.indexOf(playerToMove) + 1) % activePlayers.length;
-            const nextPlayer = activePlayers[nextPlayerIndex];
-            const newHistory = [...moveHistory, boardToString(board)];
-            const evaluation = minimax(board, depth - 1, alpha, beta, nextPlayer, aiPlayer, activePlayers, newHistory);
-            
-            // Undo move
-            board[move.from.row][move.from.col].piece = originalPiece;
-            board[move.to.row][move.to.col].piece = capturedPiece;
-
-            maxEval = Math.max(maxEval, evaluation);
-            alpha = Math.max(alpha, evaluation);
-            if (beta <= alpha) break;
-        }
-        return maxEval;
-    } else {
-        let minEval = Infinity;
-        for (const move of possibleMoves) {
-            const originalPiece = board[move.from.row][move.from.col].piece;
-            const capturedPiece = board[move.to.row][move.to.col].piece;
-
-            const pieceToMove = { ...originalPiece, hasMoved: true };
-            board[move.to.row][move.to.col].piece = pieceToMove;
-            board[move.from.row][move.from.col].piece = null;
-            if (isPromotionMove(originalPiece, move.to)) {
-                pieceToMove.type = PieceType.Queen;
-            }
-
-            const nextPlayerIndex = (activePlayers.indexOf(playerToMove) + 1) % activePlayers.length;
-            const nextPlayer = activePlayers[nextPlayerIndex];
-            const newHistory = [...moveHistory, boardToString(board)];
-            const evaluation = minimax(board, depth - 1, alpha, beta, nextPlayer, aiPlayer, activePlayers, newHistory);
-
-            // Undo move
-            board[move.from.row][move.from.col].piece = originalPiece;
-            board[move.to.row][move.to.col].piece = capturedPiece;
-
-            minEval = Math.min(minEval, evaluation);
-            beta = Math.min(beta, evaluation);
-            if (beta <= alpha) break;
-        }
-        return minEval;
-    }
+const makeMove = (board, move) => {
+    const prevCell = board[move.tr][move.tc];
+    const piece = board[move.fr][move.fc];
+    const undo = { move, captured: prevCell, prevHasMoved: piece.hasMoved, prevType: piece.type };
+    piece.hasMoved = true;
+    if (move.prom) piece.type = move.prom;
+    board[move.tr][move.tc] = piece;
+    board[move.fr][move.fc] = null;
+    return undo;
 };
 
-const findBestMoveInternal = (board, aiPlayer, activePlayers, depth, moveHistory) => {
-    const possibleMoves = getAllPossibleMoves(board, aiPlayer);
-    if (possibleMoves.length === 0) return null;
-    let bestMove = null;
-    let bestValue = -Infinity;
-    const shuffledMoves = [...possibleMoves].sort(() => Math.random() - 0.5);
+const unmakeMove = (board, undo) => {
+    const { move, captured, prevHasMoved, prevType } = undo;
+    const piece = board[move.tr][move.tc];
+    piece.hasMoved = prevHasMoved;
+    piece.type = prevType;
+    board[move.fr][move.fc] = piece;
+    board[move.tr][move.tc] = captured;
+};
 
-    for (const move of shuffledMoves) {
-        const originalPiece = board[move.from.row][move.from.col].piece;
-        const capturedPiece = board[move.to.row][move.to.col].piece;
+const getKingPos = (board, player) => {
+    for (let r=0; r<BOARD_ROWS; r++) for (let c=0; c<BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (p && p.type === PieceType.King && p.player === player) return {r, c};
+    }
+    return null;
+};
 
-        const pieceToMove = { ...originalPiece, hasMoved: true };
-        board[move.to.row][move.to.col].piece = pieceToMove;
-        board[move.from.row][move.from.col].piece = null;
-        if (isPromotionMove(originalPiece, move.to)) {
-           pieceToMove.type = PieceType.Queen;
-        }
-        
-        const nextPlayerIndex = (activePlayers.indexOf(aiPlayer) + 1) % activePlayers.length;
-        const nextPlayer = activePlayers[nextPlayerIndex];
-        const newHistory = [...moveHistory, boardToString(board)];
-        const moveValue = minimax(board, depth - 1, -Infinity, Infinity, nextPlayer, aiPlayer, activePlayers, newHistory);
-        
-        // Undo Move
-        board[move.from.row][move.from.col].piece = originalPiece;
-        board[move.to.row][move.to.col].piece = capturedPiece;
+const isCheck = (board, player) => {
+    const kPos = getKingPos(board, player);
+    if (!kPos) return true; 
+    const opponents = ['WHITE', 'BLACK', 'GRAY'].filter(p => p !== player);
+    for (const opp of opponents) {
+        if (isSquareAttackedByHero(kPos.r, kPos.c, board, opp)) return true;
+    }
+    return false;
+};
 
-        if (moveValue > bestValue) {
-            bestValue = moveValue;
-            bestMove = move;
+// --- EVALUATION ---
+const evaluate = (board, hero, activePlayers, pieceCount) => {
+    let score = 0;
+    let heroMaterial = 0;
+    let enemyMaterial = 0;
+    const heroPieces = []; 
+    const kings = {}; 
+    let heroKing = null;
+    let heroInCheck = false;
+
+    // Detect game phase
+    const isOpening = pieceCount > 25; 
+
+    for (let r=0; r<BOARD_ROWS; r++) {
+        for (let c=0; c<BOARD_COLS; c++) {
+            const p = board[r][c];
+            if (!p) continue;
+            
+            if (p.type === PieceType.King) {
+                kings[p.player] = {r, c};
+                if (p.player === hero) heroKing = {r, c};
+            }
+
+            const val = PIECE_VALUES[p.type];
+            if (p.player === hero) {
+                heroPieces.push({r, c, type: p.type, hasMoved: p.hasMoved});
+                heroMaterial += val;
+            } else if (activePlayers.indexOf(p.player) !== -1) {
+                enemyMaterial += val;
+                if (p.type === PieceType.Pawn) {
+                    const distToProm = pawnPromotionDistMap[p.player][r*BOARD_COLS+c];
+                    if (distToProm >= 300) { 
+                        score -= (distToProm * 2); 
+                    }
+                }
+            }
         }
     }
     
-    const finalMove = bestMove || shuffledMoves[0];
-    if (!finalMove) return null;
+    const isKillerMode = heroMaterial > (enemyMaterial + 200) && activePlayers.length <= 2;
 
-    const piece = board[finalMove.from.row][finalMove.from.col].piece;
-    if (piece && isPromotionMove(piece, finalMove.to)) {
-        return { ...finalMove, promotion: PieceType.Queen };
+    score += (heroMaterial * 2.0) - enemyMaterial;
+
+    if (isKillerMode && heroKing) {
+        const enemy = activePlayers.find(p => p !== hero);
+        if (enemy && kings[enemy]) {
+            const ek = kings[enemy];
+            const distBetweenKings = getDistance(heroKing.r, heroKing.c, ek.r, ek.c);
+            score += (30 - distBetweenKings) * 50; 
+        }
     }
 
-    return finalMove;
+    if (heroKing) {
+        if (!isKillerMode) {
+            score += pstKingSafety[heroKing.r * BOARD_COLS + heroKing.c];
+        }
+        heroInCheck = isCheck(board, hero);
+    }
+
+    for (const p of heroPieces) {
+        if (!isKillerMode && p.type !== PieceType.King) {
+             score += pstCenter[p.r*BOARD_COLS+p.c];
+             if (p.c > 2 && p.c < 17) score += 5;
+        }
+        
+        if (p.type === PieceType.Pawn) {
+            score += pawnPromotionDistMap[hero][p.r*BOARD_COLS+p.c];
+        }
+
+        if (isOpening && !p.hasMoved) {
+            if (p.type === PieceType.Knight || p.type === PieceType.Bishop) {
+                score -= 30; 
+            }
+        }
+
+        if (heroKing && p.type === PieceType.Queen) {
+             const distToKing = getDistance(p.r, p.c, heroKing.r, heroKing.c);
+             if (heroInCheck) {
+                if (distToKing > 5) score -= 300; 
+             } else {
+                if (!isKillerMode && (p.c < 2 || p.c > 17)) score -= 50;
+             }
+        }
+
+        if (p.type !== PieceType.Pawn && p.type !== PieceType.King) {
+            let isThreatened = false;
+            for (const enemy of activePlayers) {
+                if (enemy !== hero && isSquareAttackedByHero(p.r, p.c, board, enemy)) {
+                    isThreatened = true; 
+                    break;
+                }
+            }
+            if (isThreatened) {
+                 score -= (PIECE_VALUES[p.type] * 2.0); 
+            }
+        }
+    }
+
+    if (heroInCheck) score -= 300;
+
+    return score;
+};
+
+// --- QUIESCENCE SEARCH ---
+const quiesce = (board, alpha, beta, player, hero, active, totalPieces) => {
+    if (stop) return 0;
+    nodes++;
+    
+    const standPat = evaluate(board, hero, active, totalPieces);
+    
+    if (standPat >= beta) return beta;
+    if (alpha < standPat) alpha = standPat;
+
+    const moves = generateMoves(board, player, true); 
+
+    moves.forEach(m => {
+        m.score = 0;
+        const victim = board[m.tr][m.tc];
+        m.score += (victim ? PIECE_VALUES[victim.type] : 0) * 10;
+        const attacker = board[m.fr][m.fc];
+        m.score -= (attacker ? PIECE_VALUES[attacker.type] : 0);
+        if (m.prom) m.score += 5000; 
+    });
+    moves.sort((a, b) => b.score - a.score);
+
+    const nextIdx = (active.indexOf(player) + 1) % active.length;
+    const nextPlayer = active[nextIdx];
+    const isMaximizing = (player === hero);
+
+    for (const m of moves) {
+        const victimValue = board[m.tr][m.tc] ? PIECE_VALUES[board[m.tr][m.tc].type] : 0;
+        if (!m.prom && isMaximizing && standPat + victimValue + 200 < alpha) continue; 
+
+        const undo = makeMove(board, m);
+        if (isCheck(board, player)) { unmakeMove(board, undo); continue; }
+
+        const score = quiesce(board, alpha, beta, nextPlayer, hero, active, totalPieces);
+
+        unmakeMove(board, undo);
+        
+        if (stop) return 0;
+
+        if (isMaximizing) {
+             if (score > alpha) alpha = score;
+             if (score >= beta) return beta;
+        } else {
+             if (score < beta) beta = score;
+             if (score <= alpha) return alpha;
+        }
+    }
+    return alpha;
+};
+
+// --- SEARCH ---
+let nodes = 0;
+let stop = false;
+let endTime = 0;
+
+const alphabeta = (board, depth, alpha, beta, player, hero, active, history, totalPieces, ply) => {
+    if (stop) return 0;
+    nodes++;
+    
+    if ((nodes & 2047) === 0 && Date.now() > endTime) { stop = true; return 0; }
+
+    const boardHash = computeHash(board, player);
+    
+    if (history.includes(boardHash)) {
+        return 0; 
+    }
+
+    if (depth <= 0) {
+        return quiesce(board, alpha, beta, player, hero, active, totalPieces);
+    }
+
+    const moves = generateMoves(board, player, false);
+    
+    if (moves.length === 0) {
+        if (isCheck(board, player)) {
+            if (player === hero) return -100000 - depth; 
+            else return 100000 + depth;
+        }
+        if (player === hero) return -5000; 
+        return 5000;
+    }
+
+    // Move Ordering with Heuristics
+    moves.forEach(m => {
+        m.score = 0;
+        
+        // 1. Captures
+        if (m.cap) {
+            const victim = board[m.tr][m.tc];
+            m.score += (victim ? PIECE_VALUES[victim.type] : 0) * 100;
+        }
+        // 2. Promotions
+        if (m.prom) m.score += 50000;
+        
+        // 3. Killer Heuristic
+        const kMoves = killerMoves[ply];
+        if (kMoves && ((kMoves[0] && kMoves[0].fr === m.fr && kMoves[0].tr === m.tr) || 
+                       (kMoves[1] && kMoves[1].fr === m.fr && kMoves[1].tr === m.tr))) {
+             m.score += 9000;
+        }
+
+        // 4. History Heuristic
+        const histKey = \`\${m.fr},\${m.fc}-\${m.tr},\${m.tc}\`;
+        const histScore = historyMoves.get(histKey);
+        if (histScore) m.score += Math.min(histScore, 8000);
+
+        // 5. Pawn Push
+        const piece = board[m.fr][m.fc];
+        if (piece.type === PieceType.Pawn) {
+             const dist = pawnPromotionDistMap[player][m.tr*BOARD_COLS+m.tc];
+             if (dist > 500) m.score += dist; 
+        }
+    });
+    
+    moves.sort((a, b) => b.score - a.score);
+
+    let bestScore = -Infinity;
+    let bestMove = null;
+    const nextIdx = (active.indexOf(player) + 1) % active.length;
+    const nextPlayer = active[nextIdx];
+    const isMaximizing = (player === hero);
+    
+    const newHistory = [...history, boardHash];
+
+    for (const m of moves) {
+        const undo = makeMove(board, m);
+        if (isCheck(board, player)) { unmakeMove(board, undo); continue; }
+
+        let val;
+        if (isMaximizing) {
+            val = alphabeta(board, depth - 1, alpha, beta, nextPlayer, hero, active, newHistory, totalPieces, ply + 1);
+            if (val > bestScore) {
+                bestScore = val;
+                bestMove = m;
+            }
+            alpha = Math.max(alpha, val);
+        } else {
+            val = alphabeta(board, depth - 1, alpha, beta, nextPlayer, hero, active, newHistory, totalPieces, ply + 1);
+            if (val < beta) beta = val; 
+            if (bestScore === -Infinity || val < bestScore) {
+                bestScore = val;
+                bestMove = m;
+            }
+        }
+        
+        unmakeMove(board, undo);
+        if (stop) return 0;
+        if (beta <= alpha) {
+            // Update Killer Moves (if not capture)
+            if (!m.cap && !m.prom) {
+                const k = killerMoves[ply];
+                if (k[0] === null || (k[0].fr !== m.fr || k[0].tr !== m.tr)) {
+                    k[1] = k[0];
+                    k[0] = { fr: m.fr, fc: m.fc, tr: m.tr, tc: m.tc };
+                }
+            }
+            break;
+        }
+    }
+    
+    // Update History Heuristic for the best move
+    if (bestMove && !bestMove.cap && !bestMove.prom) {
+        const key = \`\${bestMove.fr},\${bestMove.fc}-\${bestMove.tr},\${bestMove.tc}\`;
+        const oldScore = historyMoves.get(key) || 0;
+        historyMoves.set(key, oldScore + (depth * depth));
+    }
+
+    if (bestScore === -Infinity) {
+         if (isCheck(board, player)) {
+             if (player === hero) return -100000 - depth;
+             else return 100000 + depth;
+         }
+         if (player === hero) return -5000;
+         return 5000;
+    }
+
+    return bestScore;
 };
 
 self.onmessage = (e) => {
-    const { board, aiPlayer, activePlayers, depth, moveHistory } = e.data;
-    const bestMove = findBestMoveInternal(board, aiPlayer, activePlayers, depth, moveHistory);
-    self.postMessage(bestMove);
+    try {
+        const { board: rawBoard, aiPlayer, activePlayers, depth: initialDepth, positionHistory } = e.data; 
+        
+        const board = new Array(BOARD_ROWS);
+        let heroCount = 0;
+        let enemyCount = 0;
+        let totalPieces = 0;
+        
+        for(let r=0; r<BOARD_ROWS; r++) {
+            board[r] = new Array(BOARD_COLS);
+            for(let c=0; c<BOARD_COLS; c++) {
+                const cell = rawBoard[r][c];
+                if (cell && cell.piece) {
+                    board[r][c] = { type: cell.piece.type, player: cell.piece.player, hasMoved: cell.piece.hasMoved };
+                    if (cell.piece.player === aiPlayer) heroCount += PIECE_VALUES[cell.piece.type];
+                    else enemyCount += PIECE_VALUES[cell.piece.type];
+                    totalPieces++;
+                } else {
+                    board[r][c] = null;
+                }
+            }
+        }
+        
+        if (!getKingPos(board, aiPlayer)) { 
+            console.error("AI: King not found!");
+            self.postMessage(null); return; 
+        }
+
+        const isDeepEndgame = (activePlayers.length === 2 && heroCount > enemyCount + 400); 
+        CURRENT_TIME_LIMIT = isDeepEndgame ? 4500 : 1500;
+
+        nodes = 0;
+        stop = false;
+        endTime = Date.now() + CURRENT_TIME_LIMIT;
+        
+        // Reset Heuristics for new turn
+        historyMoves.clear();
+        for(let i=0; i<MAX_PLY; i++) { killerMoves[i][0] = null; killerMoves[i][1] = null; }
+
+        let moves = generateMoves(board, aiPlayer, false);
+        const validMoves = [];
+        
+        for(const m of moves) {
+            const undo = makeMove(board, m);
+            if (!isCheck(board, aiPlayer)) {
+                const nextP = activePlayers[(activePlayers.indexOf(aiPlayer) + 1) % activePlayers.length];
+                const strRep = boardToString(board) + '#' + (nextP || '');
+                if (!positionHistory.includes(strRep)) {
+                     validMoves.push(m);
+                }
+            }
+            unmakeMove(board, undo);
+        }
+        
+        if (validMoves.length === 0) { 
+            console.warn("AI: No valid moves found via generateMoves (Checkmate/Stalemate)");
+            self.postMessage(null); 
+            return; 
+        }
+
+        const enemy = activePlayers.find(p => p !== aiPlayer);
+        const enemyKingPos = enemy ? getKingPos(board, enemy) : null;
+
+        validMoves.sort((a, b) => {
+            const pA = board[a.tr][a.tc], pB = board[b.tr][b.tc];
+            let valA = (pA ? PIECE_VALUES[pA.type] : 0) + (a.prom ? 50000 : 0);
+            let valB = (pB ? PIECE_VALUES[pB.type] : 0) + (b.prom ? 50000 : 0);
+            if (isDeepEndgame && enemyKingPos) {
+                 valA += (20 - getDistance(a.tr, a.tc, enemyKingPos.r, enemyKingPos.c)) * 10;
+                 valB += (20 - getDistance(b.tr, b.tc, enemyKingPos.r, enemyKingPos.c)) * 10;
+            }
+            return valB - valA;
+        });
+
+        let bestMove = validMoves[0];
+
+        for (let d = 1; d <= 25; d++) {
+            let alpha = -Infinity;
+            let beta = Infinity;
+            let levelBestMove = null;
+            let levelBestScore = -Infinity;
+
+            for (const m of validMoves) {
+                const undo = makeMove(board, m);
+                const nextPlayer = activePlayers[(activePlayers.indexOf(aiPlayer) + 1) % activePlayers.length];
+                
+                const score = alphabeta(board, d - 1, alpha, beta, nextPlayer, aiPlayer, activePlayers, [], totalPieces, 1);
+
+                unmakeMove(board, undo);
+                
+                if (stop) break;
+
+                if (score > levelBestScore) {
+                    levelBestScore = score;
+                    levelBestMove = m;
+                }
+                alpha = Math.max(alpha, levelBestScore);
+            }
+            
+            if (stop) break;
+            
+            if (levelBestMove) {
+                bestMove = levelBestMove;
+                if (levelBestScore > 90000) break; 
+            }
+        }
+
+        if (bestMove) {
+            const promotion = bestMove.prom || (isPromotionZone(aiPlayer, bestMove.tr, bestMove.tc) && board[bestMove.fr][bestMove.fc].type === PieceType.Pawn ? PieceType.Queen : undefined);
+            self.postMessage({
+                from: { row: bestMove.fr, col: bestMove.fc },
+                to: { row: bestMove.tr, col: bestMove.tc },
+                promotion: promotion
+            });
+        } else {
+            console.error("AI: Search returned no best move.");
+            self.postMessage(null);
+        }
+    } catch (err) {
+        console.error("AI Worker Critical Error:", err);
+        self.postMessage(null);
+    }
 };
 `;
 
 export const findBestMove = (
-    board: (BoardCell | null)[][], 
-    aiPlayer: Player, 
-    activePlayers: Player[],
-    depth: number,
-    moveHistory: string[]
+  board: (BoardCell | null)[][], 
+  aiPlayer: Player, 
+  activePlayers: Player[], 
+  depth: number, 
+  positionHistory: string[]
 ): { worker: Worker; url: string } => {
-    const blob = new Blob([workerCode], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    const worker = new Worker(url);
-    worker.postMessage({ board, aiPlayer, activePlayers, depth, moveHistory });
-    return { worker, url };
+  const blob = new Blob([workerCode], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  const worker = new Worker(url);
+
+  worker.postMessage({
+    board,
+    aiPlayer,
+    activePlayers,
+    depth,
+    positionHistory
+  });
+
+  return { worker, url };
 };
 
-export const getAiSetup = (board: (BoardCell | null)[][], aiPlayer: Player, piecesToPlace: PieceType[]): (BoardCell | null)[][] => {
-    const newBoard = JSON.parse(JSON.stringify(board));
-    const validZoneCoords = SETUP_ZONES[aiPlayer];
-    const availableCells = validZoneCoords.filter(coords => !newBoard[coords.row][coords.col]?.piece);
-    
-    if (availableCells.length < piecesToPlace.length) {
-        console.error(`AI for ${aiPlayer} has not enough space to set up pieces.`);
-        return newBoard; // Return original board if something is wrong
+export const getAiSetup = (
+  board: (BoardCell | null)[][],
+  player: Player,
+  piecesToPlace: PieceType[]
+): (BoardCell | null)[][] => {
+  const newBoard = JSON.parse(JSON.stringify(board));
+  const zones = SETUP_ZONES[player];
+  
+  const availableSlots = zones.filter(coords => {
+    const cell = newBoard[coords.row][coords.col];
+    return cell && !cell.piece;
+  });
+
+  for (let i = availableSlots.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [availableSlots[i], availableSlots[j]] = [availableSlots[j], availableSlots[i]];
+  }
+
+  piecesToPlace.forEach((pieceType, index) => {
+    if (index < availableSlots.length) {
+      const { row, col } = availableSlots[index];
+      (newBoard[row][col] as BoardCell).piece = {
+        player,
+        type: pieceType,
+        hasMoved: false
+      };
     }
-    
-    const shuffledCells = [...availableCells].sort(() => Math.random() - 0.5);
+  });
 
-    piecesToPlace.forEach((pieceType, index) => {
-        const targetCellCoords = shuffledCells[index];
-        (newBoard[targetCellCoords.row][targetCellCoords.col] as BoardCell).piece = { player: aiPlayer, type: pieceType, hasMoved: false };
-    });
-
-    return newBoard;
+  return newBoard;
 };

@@ -10,9 +10,19 @@ interface PieceStashProps {
   onPieceDragStart: (pieceType: PieceType) => void;
   onPieceDragEnd: () => void;
   onRandomPlacement: () => void;
+  selectedPieceType?: PieceType | null;
+  onPieceSelect?: (pieceType: PieceType) => void;
 }
 
-const PieceStash: React.FC<PieceStashProps> = ({ playerToSetup, piecesToPlace, onPieceDragStart, onPieceDragEnd, onRandomPlacement }) => {
+const PieceStash: React.FC<PieceStashProps> = ({ 
+  playerToSetup, 
+  piecesToPlace, 
+  onPieceDragStart, 
+  onPieceDragEnd, 
+  onRandomPlacement,
+  selectedPieceType,
+  onPieceSelect
+}) => {
   if (piecesToPlace.length === 0) return null;
 
   const playerInfo = PLAYER_COLORS[playerToSetup];
@@ -21,18 +31,26 @@ const PieceStash: React.FC<PieceStashProps> = ({ playerToSetup, piecesToPlace, o
     <>
       <h2 className={`text-lg font-semibold mb-3 ${playerInfo.text}`}>Place your pieces:</h2>
       <div className="grid grid-cols-3 gap-2 mb-4">
-        {piecesToPlace.map((pieceType, index) => (
-          <div
-            key={`${pieceType}-${index}`}
-            draggable
-            onDragStart={() => onPieceDragStart(pieceType)}
-            onDragEnd={onPieceDragEnd}
-            className="relative flex items-center justify-center aspect-square rounded-lg bg-gray-700 hover:bg-gray-600 cursor-grab active:cursor-grabbing transition-all duration-200 transform hover:scale-105"
-            title={`Drag to place ${pieceType.toLowerCase()}`}
-          >
-            <PieceComponent piece={{ player: playerToSetup, type: pieceType }} />
-          </div>
-        ))}
+        {piecesToPlace.map((pieceType, index) => {
+          const isSelected = selectedPieceType === pieceType;
+          return (
+            <div
+              key={`${pieceType}-${index}`}
+              draggable
+              onDragStart={() => onPieceDragStart(pieceType)}
+              onDragEnd={onPieceDragEnd}
+              onClick={() => onPieceSelect && onPieceSelect(pieceType)}
+              className={`relative flex items-center justify-center aspect-square rounded-lg cursor-pointer active:cursor-grabbing transition-all duration-200 transform hover:scale-105 ${
+                isSelected 
+                  ? 'bg-gray-600 ring-2 ring-yellow-400 scale-105 z-10' 
+                  : 'bg-gray-700 hover:bg-gray-600'
+              }`}
+              title={`Drag or Click to place ${pieceType.toLowerCase()}`}
+            >
+              <PieceComponent piece={{ player: playerToSetup, type: pieceType }} />
+            </div>
+          );
+        })}
       </div>
       <button
         onClick={onRandomPlacement}

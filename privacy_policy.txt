@@ -1,0 +1,39 @@
+Privacy Policy
+Last updated: December 2025
+
+This application ("TriChess Game") is developed and published by Yauheni Mikhnevich.
+
+The application does NOT collect, store, transmit, or process any personal data from users.
+
+1. Data Collection
+The application does not collect:
+– Personal information
+– Contact information
+– Device identifiers
+– Location data
+– Usage data
+– Photos, media, or files
+– Any other sensitive or private user data
+
+2. Data Sharing
+Since no data is collected, no data is shared with third parties.
+
+3. Internet Access
+The application may use internet access only to load game resources or allow general functionality. No tracking, analytics, or advertising systems are used.
+
+4. Third-Party Services
+The app does not use any third-party SDKs that collect personal information.
+
+5. Children’s Privacy
+The app is safe for all ages and does not collect information from children.
+
+6. Changes to This Policy
+If the policy changes, the updated version will be published in the same location where this document is hosted.
+
+7. Contact Information
+If you have any questions about this Privacy Policy, you can contact the developer:
+
+Name: Yauheni Mikhnevich  
+Email: yauheni@example.com (replace with your actual email)  
+
+© 2025 TriChess Game

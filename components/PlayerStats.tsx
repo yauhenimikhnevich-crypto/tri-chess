@@ -1,5 +1,6 @@
+
 import React from 'react';
-import { Player, Piece } from '../types';
+import { Player, Piece, PlayerType } from '../types';
 import { PLAYER_COLORS, PIECE_UNICODE } from '../constants';
 
 interface PlayerStatsProps {
@@ -9,9 +10,22 @@ interface PlayerStatsProps {
   leftPlayers: Player[];
   currentPlayer: Player;
   myColor: Player | null; // To identify which player is "you"
+  playerNames: { [key in Player]?: string };
+  finalRatingChanges?: { [playerId: string]: number } | null;
+  playerTypes?: { [key in Player]: PlayerType | 'ONLINE_HUMAN' };
 }
 
-const PlayerStats: React.FC<PlayerStatsProps> = ({ scores, capturedPieces, eliminatedPlayers, leftPlayers, currentPlayer, myColor }) => {
+const PlayerStats: React.FC<PlayerStatsProps> = ({ 
+    scores, 
+    capturedPieces, 
+    eliminatedPlayers, 
+    leftPlayers, 
+    currentPlayer, 
+    myColor, 
+    playerNames, 
+    finalRatingChanges,
+    playerTypes,
+}) => {
   const players: Player[] = [Player.White, Player.Black, Player.Gray];
 
   return (
@@ -25,11 +39,12 @@ const PlayerStats: React.FC<PlayerStatsProps> = ({ scores, capturedPieces, elimi
         const isInactive = isEliminated || hasLeft;
         const isCurrentTurn = currentPlayer === player && !isInactive;
         const isYou = player === myColor;
-
+        const nickname = playerNames[player];
+        const ratingChange = finalRatingChanges && finalRatingChanges[player];
+        
         let statusText = '';
         if (isEliminated) statusText = '(Eliminated)';
         else if (hasLeft) statusText = '(Left)';
-
 
         return (
           <div 
@@ -39,7 +54,18 @@ const PlayerStats: React.FC<PlayerStatsProps> = ({ scores, capturedPieces, elimi
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <span className={`w-4 h-4 rounded-full ${playerInfo.bg}`}></span>
-                <span className={`font-semibold ${playerInfo.text}`}>{playerInfo.name} {isYou && '(You)'} {statusText}</span>
+                <span className={`font-semibold ${playerInfo.text} flex items-center gap-1`}>
+                  {playerInfo.name}
+                  {nickname && <span className="font-normal opacity-80 text-sm ml-1">({nickname})</span>}
+                  {isYou && <span className="ml-1 opacity-70 italic text-xs">(You)</span>}
+                  
+                  {statusText && <span className="ml-1 text-red-400 text-xs">{statusText}</span>}
+                  {ratingChange !== undefined && ratingChange !== 0 && (
+                      <span className={`ml-2 text-xs font-bold ${ratingChange > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                          {ratingChange > 0 ? '+' : ''}{ratingChange}
+                      </span>
+                  )}
+                </span>
               </div>
               <span className="font-bold text-lg">{scores[player]} pts</span>
             </div>

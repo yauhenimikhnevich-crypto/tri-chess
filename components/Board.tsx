@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { BoardCell, Coordinates } from '../types';
 import CellComponent from './Cell';
@@ -10,11 +11,12 @@ interface BoardProps {
   onCellClick: (coords: Coordinates) => void;
   onCellDrop: (coords: Coordinates) => void;
   onCellDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  customCellSize?: string;
 }
 
-const Board: React.FC<BoardProps> = ({ boardState, selectedPiece, validMoves, onCellClick, onCellDrop, onCellDragOver, gamePhase }) => {
+const Board: React.FC<BoardProps> = ({ boardState, selectedPiece, validMoves, onCellClick, onCellDrop, onCellDragOver, gamePhase, customCellSize }) => {
   return (
-    <div className="flex flex-col items-center p-4 bg-gray-800/50 rounded-lg shadow-2xl">
+    <div className="flex flex-col items-center p-4 rounded-lg">
       {boardState.map((row, r) => (
         <div key={r} className="flex">
           {row.map((cell, c) => {
@@ -30,6 +32,7 @@ const Board: React.FC<BoardProps> = ({ boardState, selectedPiece, validMoves, on
                 onClick={onCellClick}
                 onDrop={() => onCellDrop(coords)}
                 onDragOver={onCellDragOver}
+                customSize={customCellSize}
               />
             );
           })}

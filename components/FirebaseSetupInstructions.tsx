@@ -1,106 +1,127 @@
+
 import React from 'react';
 
 const FirebaseSetupInstructions: React.FC = () => {
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col items-center justify-center p-4 font-sans text-white">
-      <div className="w-full max-w-3xl bg-gray-800 p-8 rounded-lg shadow-2xl border border-yellow-500">
-        <h1 className="text-3xl font-bold mb-4 text-yellow-400">Firebase Configuration Required</h1>
+      <div className="w-full max-w-4xl bg-gray-800 p-8 rounded-lg shadow-2xl border border-yellow-500 overflow-y-auto max-h-[90vh]">
+        <h1 className="text-3xl font-bold mb-4 text-yellow-400">Production Security Rules</h1>
         <p className="text-gray-300 mb-6">
-          To enable online features, you need to connect this app to a free Firebase project. Please follow these steps:
+          To publish to Google Play, you must secure your database. These rules ensure players can only modify their own games and data.
         </p>
-        <ol className="list-decimal list-inside text-left space-y-4 text-gray-200">
-          <li>
-            Go to the{' '}
-            <a href="https://console.firebase.google.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline font-semibold">
-              Firebase Console
-            </a>{' '}
-            and create a new project.
-          </li>
-          <li>
-            In your new project, enable the following services under the "Build" section:
-            <ul className="list-disc list-inside ml-6 mt-2 space-y-1">
-              <li>
-                <strong>Authentication:</strong> Go to the "Sign-in method" tab and enable the{' '}
-                <strong className="text-yellow-400">Anonymous</strong> provider.
-              </li>
-              <li>
-                <strong>Firestore Database:</strong> Create a new database.
-              </li>
-              <li>
-                <strong>Realtime Database:</strong> Create a new database.
-              </li>
-            </ul>
-          </li>
-          <li className="font-bold text-yellow-400">
-            Configure Security Rules: By default, your databases are locked. You must allow access.
-             <ul className="list-disc list-inside ml-6 mt-2 space-y-2 font-normal">
-              <li>
-                For <strong>Firestore Database</strong>, go to its "Rules" tab and replace the contents with:
-                <pre className="bg-gray-900 text-green-300 p-2 rounded mt-1 text-xs whitespace-pre-wrap">
-                  {`rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+
+        <div className="space-y-8">
+          {/* STEP 1: CONFIG */}
+          <section className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
+            <h2 className="text-xl font-bold text-indigo-400 mb-2">Step 1: App Config</h2>
+            <p className="text-gray-300">Ensure your <code className="text-yellow-300">constants.ts</code> has the correct keys. No changes needed here if the app is already working.</p>
+          </section>
+
+          {/* STEP 2: REALTIME DB RULES */}
+          <section className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
+            <h2 className="text-xl font-bold text-pink-400 mb-2">Step 2: Realtime Database Rules (Presence)</h2>
+            <p className="text-gray-300 mb-2">Go to <strong>Realtime Database</strong> &rarr; <strong>Rules</strong>. Replace everything with:</p>
+            <pre className="bg-gray-900 text-pink-300 p-3 rounded mt-2 text-xs sm:text-sm font-mono whitespace-pre-wrap select-all">
+{`{
+  "rules": {
+    "status": {
+      ".read": "auth != null",
+      "$uid": {
+        // Only the user themselves can change their online status
+        ".write": "$uid === auth.uid"
+      }
     }
   }
 }`}
-                </pre>
-              </li>
-              <li>
-                For <strong>Realtime Database</strong>, go to its "Rules" tab and replace the contents with:
-                <pre className="bg-gray-900 text-green-300 p-2 rounded mt-1 text-xs whitespace-pre-wrap">
-                  {`{
-  "rules": {
-    ".read": "auth != null",
-    ".write": "auth != null"
+            </pre>
+          </section>
+
+          {/* STEP 3: FIRESTORE RULES */}
+          <section className="bg-gray-700/50 p-4 rounded-lg border border-gray-600">
+            <h2 className="text-xl font-bold text-orange-400 mb-2">Step 3: Firestore Rules (Game Security)</h2>
+            <p className="text-gray-300 mb-2">Go to <strong>Firestore Database</strong> &rarr; <strong>Rules</strong>. Replace everything with these secure rules:</p>
+            <pre className="bg-gray-900 text-orange-300 p-3 rounded mt-2 text-xs sm:text-sm font-mono whitespace-pre-wrap select-all">
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if user is signed in
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // Helper to check if the user is one of the players in the game
+    function isGamePlayer() {
+      return request.auth.uid in resource.data.playerIds;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      // Allow create only if auth matches ID (initial reg)
+      allow create: if request.auth.uid == userId;
+      // Allow update if auth matches ID
+      allow update: if request.auth.uid == userId;
+      
+      // Game Invitations (subcollection)
+      match /game_invitations/{inviteId} {
+        allow create: if isSignedIn(); 
+        allow read, update, delete: if request.auth.uid == userId;
+      }
+    }
+
+    // 2. Usernames (Unique Check)
+    match /usernames/{username} {
+      // Anyone can read to check availability
+      allow read: if isSignedIn();
+      // Only allow creation if it doesn't exist
+      allow create: if isSignedIn();
+      // Allow owner to update or delete
+      allow update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // 3. Matchmaking Queue
+    match /matchmakingQueue/{userId} {
+      allow read: if isSignedIn();
+      // Users can only add/remove THEMSELVES from the queue
+      allow write: if request.auth.uid == userId;
+    }
+
+    // 4. Direct Invites
+    match /invites/{inviteId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      // Only sender or receiver can update/delete invites
+      allow update, delete: if isSignedIn() && (
+        resource.data.from.id == request.auth.uid || 
+        resource.data.to.id == request.auth.uid
+      );
+    }
+    
+    // 5. Game Proposals
+    match /game_proposals/{proposalId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn(); 
+      allow delete: if isSignedIn(); // Allow delete to cancel sessions
+    }
+
+    // 6. Games (The most important part)
+    match /games/{gameId} {
+      // Anyone can create a game
+      allow create: if isSignedIn();
+      // Anyone logged in can read games (needed for lobby logic/spectating checks)
+      allow read: if isSignedIn();
+      // ONLY players listed in 'playerIds' can update the game state (make moves)
+      allow update: if isSignedIn() && isGamePlayer();
+      // Only players can delete (e.g. when leaving)
+      allow delete: if isSignedIn() && isGamePlayer();
+    }
   }
 }`}
-                </pre>
-              </li>
-            </ul>
-          </li>
-          <li className="font-bold text-yellow-400">
-            Create Firestore Indexes: For the invite system to work, you need to create two indexes.
-             <ul className="list-disc list-inside ml-6 mt-2 space-y-2 font-normal">
-              <li>
-                In the <strong>Firestore Database</strong> section, go to the "Indexes" tab and click "Create Composite Index".
-              </li>
-              <li>
-                <strong>Index 1 (for received invites):</strong>
-                 <ul className="list-['>'] list-inside ml-4 mt-1">
-                    <li>Collection ID: <code className="bg-gray-700 p-1 rounded text-sm">invites</code></li>
-                    <li>Field 1: <code className="bg-gray-700 p-1 rounded text-sm">to.id</code> (Ascending)</li>
-                    <li>Field 2: <code className="bg-gray-700 p-1 rounded text-sm">timestamp</code> (Descending)</li>
-                 </ul>
-              </li>
-               <li>
-                <strong>Index 2 (for sent invites):</strong>
-                 <ul className="list-['>'] list-inside ml-4 mt-1">
-                    <li>Collection ID: <code className="bg-gray-700 p-1 rounded text-sm">invites</code></li>
-                    <li>Field 1: <code className="bg-gray-700 p-1 rounded text-sm">from.id</code> (Ascending)</li>
-                    <li>Field 2: <code className="bg-gray-700 p-1 rounded text-sm">timestamp</code> (Descending)</li>
-                 </ul>
-              </li>
-              <li className="text-xs text-gray-400">It may take a few minutes for the indexes to build after you create them.</li>
-            </ul>
-          </li>
-          <li>
-            Go to your Project Settings (click the gear icon <span className="font-mono text-lg">⚙️</span> next to "Project Overview") and scroll down to "Your apps".
-          </li>
-          <li>
-            Click the web icon <strong className="font-mono text-2xl">(&lt;/&gt;)</strong> to register a new web app.
-          </li>
-          <li>
-            Firebase will provide you with a <code className="bg-gray-700 p-1 rounded text-sm">firebaseConfig</code> object. Copy this object.
-          </li>
-          <li>
-            In the code editor, open the file <code className="bg-gray-700 p-1 rounded text-sm">constants.ts</code> and paste your configuration, replacing the placeholder values.
-          </li>
-        </ol>
-        <p className="mt-8 text-center text-gray-400">
-          Once you've added your configuration and set the rules, this page will reload automatically.
-        </p>
+            </pre>
+          </section>
+        </div>
       </div>
     </div>
   );

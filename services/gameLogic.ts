@@ -1,4 +1,3 @@
-
 import { BoardCell, Coordinates, Piece, Player, PieceType } from '../types';
 import { BOARD_COLS, BOARD_ROWS, PROMOTION_ZONES } from '../constants';
 
@@ -18,7 +17,21 @@ const isPlayable = (coords: Coordinates, boardState: (BoardCell | null)[][]): bo
   return cell?.isPlayable === true;
 };
 
-// Internal function to calculate all potential moves for a piece, without validating against checks.
+const findKings = (boardState: (BoardCell | null)[][]): { player: Player; coords: Coordinates }[] => {
+    const kings = [];
+    for (let r = 0; r < BOARD_ROWS; r++) {
+        for (let c = 0; c < BOARD_COLS; c++) {
+            const cell = boardState[r][c];
+            if (cell?.piece?.type === PieceType.King) {
+                kings.push({ player: cell.piece.player, coords: { row: r, col: c } });
+            }
+        }
+    }
+    return kings;
+};
+
+
+// Internal function to calculate all potential moves for a piece, including attacks on kings for check detection.
 const calculateRawMoves = (piece: Piece, position: Coordinates, boardState: (BoardCell | null)[][], kingIsCurrentlyInCheck: boolean = false): Coordinates[] => {
   const moves: Coordinates[] = [];
 
@@ -43,7 +56,7 @@ const calculateRawMoves = (piece: Piece, position: Coordinates, boardState: (Boa
       for(const move of potentialMoves) {
           if(isPlayable(move, boardState)) {
               const pieceAtNext = boardState[move.row][move.col]?.piece;
-              if(!pieceAtNext || pieceAtNext.player !== piece.player) {
+              if(!pieceAtNext || (pieceAtNext.player !== piece.player)) {
                   moves.push(move);
               }
           }
@@ -119,7 +132,16 @@ const calculateRawMoves = (piece: Piece, position: Coordinates, boardState: (Boa
           { row: position.row, col: position.col + 1 },
           { row: position.row, col: position.col - 1 },
         ];
-        addSingleMoves(orthogonalMoves);
+        // The orthogonal "diagonal switch" move cannot be used to capture.
+        // It must land on an empty square.
+        for (const move of orthogonalMoves) {
+            if(isPlayable(move, boardState)) {
+                const pieceAtNext = boardState[move.row][move.col]?.piece;
+                if(!pieceAtNext) { // Only allow move to empty cell
+                    moves.push(move);
+                }
+            }
+        }
       }
       break;
 
@@ -148,7 +170,7 @@ const calculateRawMoves = (piece: Piece, position: Coordinates, boardState: (Boa
       addSingleMoves(knightMoves);
       break;
   }
-
+  
   return moves;
 };
 
@@ -186,28 +208,9 @@ export const isKingInCheck = (player: Player, boardState: (BoardCell | null)[][]
     for (let c = 0; c < BOARD_COLS; c++) {
       const cell = boardState[r][c];
       if (cell?.piece && opponents.includes(cell.piece.player)) {
-        if (cell.piece.type === PieceType.Bishop) {
-            // Bishops only check diagonally. We must calculate their attacking moves separately
-            // to exclude the non-attacking orthogonal "diagonal switch" move.
-            const directions = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
-            for (const [dr, dc] of directions) {
-                let nextPos: Coordinates = { row: r + dr, col: c + dc };
-                while (isPlayable(nextPos, boardState)) {
-                    if (nextPos.row === kingPos.row && nextPos.col === kingPos.col) {
-                        return true; // Found a check
-                    }
-                    const pieceAtNext = boardState[nextPos.row][nextPos.col]?.piece;
-                    if (pieceAtNext) {
-                        break; // Path is blocked
-                    }
-                    nextPos = { row: nextPos.row + dr, col: nextPos.col + dc };
-                }
-            }
-        } else {
-            const moves = calculateRawMoves(cell.piece, { row: r, col: c }, boardState);
-            if (moves.some(move => move.row === kingPos.row && move.col === kingPos.col)) {
-              return true;
-            }
+        const moves = calculateRawMoves(cell.piece, { row: r, col: c }, boardState);
+        if (moves.some(move => move.row === kingPos.row && move.col === kingPos.col)) {
+          return true;
         }
       }
     }
@@ -216,12 +219,54 @@ export const isKingInCheck = (player: Player, boardState: (BoardCell | null)[][]
 };
 
 export const getValidMoves = (piece: Piece, position: Coordinates, boardState: (BoardCell | null)[][]): Coordinates[] => {
-  const kingIsCurrentlyInCheck = isKingInCheck(piece.player, boardState);
-  const rawMoves = calculateRawMoves(piece, position, boardState, kingIsCurrentlyInCheck);
+  let rawMoves = calculateRawMoves(piece, position, boardState);
   
-  return rawMoves.filter(move => {
+  // NEW RULE: Kings cannot be adjacent to each other.
+  if (piece.type === PieceType.King) {
+      const otherKingPositions = findKings(boardState)
+          .filter(k => k.player !== piece.player)
+          .map(k => k.coords);
+
+      rawMoves = rawMoves.filter(move => {
+          for (const kingPos of otherKingPositions) {
+              if (Math.abs(move.row - kingPos.row) <= 1 && Math.abs(move.col - kingPos.col) <= 1) {
+                  return false; // Move is illegal if adjacent to another king.
+              }
+          }
+          return true;
+      });
+  }
+  
+  const legalMoves = rawMoves.filter(move => {
     const tempBoard = simulateMove(boardState, position, move);
-    return !isKingInCheck(piece.player, tempBoard);
+    
+    // Standard check: Move is invalid if it leaves your own king in check.
+    if (isKingInCheck(piece.player, tempBoard)) {
+        return false;
+    }
+
+    // NEW RULE: Bishop's special orthogonal move cannot be used to deliver check.
+    if (piece.type === PieceType.Bishop) {
+        // Was this an orthogonal move? (A move where row OR col is the same)
+        const isOrthogonalMove = move.row === position.row || move.col === position.col;
+        if (isOrthogonalMove) {
+            const opponents = [Player.White, Player.Black, Player.Gray].filter(p => p !== piece.player);
+            // Check if this move puts any opponent in check.
+            for (const opponent of opponents) {
+                if (isKingInCheck(opponent, tempBoard)) {
+                    return false; // If it does, the move is illegal.
+                }
+            }
+        }
+    }
+
+    return true;
+  });
+
+  // A move is never valid if it captures a king. Checkmate is the only way to win.
+  return legalMoves.filter(move => {
+      const pieceAtDestination = boardState[move.row][move.col]?.piece;
+      return !pieceAtDestination || pieceAtDestination.type !== PieceType.King;
   });
 };
 
@@ -263,6 +308,51 @@ export const isStalemate = (player: Player, boardState: (BoardCell | null)[][]):
     }
 
     return true; // No legal moves found for any piece
+};
+
+export const isDrawByInsufficientMaterial = (boardState: (BoardCell | null)[][], activePlayers: Player[]): boolean => {
+    const pieces: { [key in Player]: PieceType[] } = {
+        [Player.White]: [],
+        [Player.Black]: [],
+        [Player.Gray]: [],
+    };
+    let totalPieceCount = 0;
+
+    for (const row of boardState) {
+        for (const cell of row) {
+            if (cell?.piece && activePlayers.includes(cell.piece.player)) {
+                pieces[cell.piece.player].push(cell.piece.type);
+                totalPieceCount++;
+            }
+        }
+    }
+
+    // If only kings remain, it's a draw.
+    if (totalPieceCount === activePlayers.length) {
+        return true;
+    }
+
+    // Check for K+N vs K... or K+B vs K... scenarios across all players
+    let knightCount = 0;
+    let bishopCount = 0;
+    let otherMajorPieceCount = 0; // Pawns, rooks, queens
+
+    activePlayers.forEach(player => {
+        pieces[player].forEach(type => {
+            if (type === PieceType.Knight) knightCount++;
+            else if (type === PieceType.Bishop) bishopCount++;
+            else if (type !== PieceType.King) otherMajorPieceCount++;
+        });
+    });
+
+    if (otherMajorPieceCount === 0) {
+        // Only minor pieces and kings are left
+        if (knightCount <= 1 && bishopCount === 0) return true; // (K... vs K+N)
+        if (bishopCount <= 1 && knightCount === 0) return true; // (K... vs K+B)
+        // Note: K+B vs K+B with same color bishops could also be a draw, but this is a simpler check.
+    }
+
+    return false;
 };
 
 export const determineStalemateWinner = (stalematedPlayer: Player, boardState: (BoardCell | null)[][], activeOpponents: Player[]): Player | null => {

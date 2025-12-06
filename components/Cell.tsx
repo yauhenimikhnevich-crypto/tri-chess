@@ -13,11 +13,12 @@ interface CellProps {
   onClick: (coords: Coordinates) => void;
   onDrop: () => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  customSize?: string;
 }
 
-const Cell: React.FC<CellProps> = ({ cell, coords, isSelected, isValidMove, isSetupPhase, onClick, onDrop, onDragOver }) => {
+const Cell: React.FC<CellProps> = ({ cell, coords, isSelected, isValidMove, isSetupPhase, onClick, onDrop, onDragOver, customSize }) => {
   if (!cell) {
-    return <div className="w-5 h-5 sm:w-7 sm:h-7 md:w-9 md:h-9 lg:w-12 lg:h-12"></div>;
+    return <div className={customSize || "w-5 h-5 sm:w-7 sm:h-7 md:w-9 md:h-9 lg:w-12 lg:h-12"}></div>;
   }
 
   const isEven = (coords.row + coords.col) % 2 === 0;
@@ -40,10 +41,11 @@ const Cell: React.FC<CellProps> = ({ cell, coords, isSelected, isValidMove, isSe
   }
 
   const promotionPlayer = PROMOTION_ZONE_PLAYER_MAP.get(`${coords.row}-${coords.col}`);
+  const sizeClass = customSize || "w-5 h-5 sm:w-7 sm:h-7 md:w-9 md:h-9 lg:w-12 lg:h-12";
 
   return (
     <div
-      className={`relative group w-5 h-5 sm:w-7 sm:h-7 md:w-9 md:h-9 lg:w-12 lg:h-12 flex items-center justify-center transition-colors duration-200 ${bgColor} ${extraClasses}`}
+      className={`relative group ${sizeClass} flex items-center justify-center transition-colors duration-200 ${bgColor} ${extraClasses}`}
       onClick={() => cell.isPlayable && onClick(coords)}
       onDrop={onDrop}
       onDragOver={onDragOver}
